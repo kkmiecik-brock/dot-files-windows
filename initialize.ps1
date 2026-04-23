@@ -41,6 +41,14 @@ foreach ($app in $apps) {
     }
 }
 
+# GlazeWM pulls in Zebar as a dependency — remove it
+if (scoop list zebar 2>$null | Select-String "zebar") {
+    Write-Host "Removing Zebar..." -ForegroundColor Cyan
+    scoop uninstall zebar
+} else {
+    Write-Host "Zebar not present, skipping." -ForegroundColor Green
+}
+
 # ── 4. Dotfiles ───────────────────────────────────────────────────────────────
 
 function Copy-Dotfile {
