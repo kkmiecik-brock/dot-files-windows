@@ -28,14 +28,15 @@ if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
 
 Write-Host "Adding Scoop buckets..." -ForegroundColor Cyan
 scoop bucket add extras 2>$null
-scoop bucket add glzr https://github.com/glzr-io/scoop-glzr 2>$null
+scoop bucket add glzr-io https://github.com/glzr-io/scoop-bucket.git 2>$null
 
 # ── 3. Apps ───────────────────────────────────────────────────────────────────
 
-$apps = @("glazewm", "yasb", "flow-launcher")
+$apps = @("glzr-io/glazewm", "yasb", "flow-launcher")
 foreach ($app in $apps) {
-    if (scoop list $app 2>$null | Select-String $app) {
-        Write-Host "$app already installed." -ForegroundColor Green
+    $appName = $app.Split("/")[-1]
+    if (scoop list $appName 2>$null | Select-String $appName) {
+        Write-Host "$appName already installed." -ForegroundColor Green
     } else {
         Write-Host "Installing $app..." -ForegroundColor Cyan
         scoop install $app
