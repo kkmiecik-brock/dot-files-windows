@@ -81,4 +81,25 @@ Copy-Dotfile ".config\yasb\hide_taskbar.py"
 Copy-Dotfile "AppData\Roaming\FlowLauncher\Settings\Settings.json"
 Copy-Dotfile "AppData\Roaming\FlowLauncher\Themes\Catppuccin Mocha.xaml"
 
-Write-Host "`nDone! Restart GlazeWM and YASB to apply changes." -ForegroundColor Cyan
+# ── 5. Startup entries ────────────────────────────────────────────────────────
+
+Write-Host "`nConfiguring startup entries..." -ForegroundColor Cyan
+
+$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+
+$startupApps = @{
+    "GlazeWM"      = "$env:USERPROFILE\scoop\apps\glazewm\current\glazewm.exe"
+    "FlowLauncher" = "$env:USERPROFILE\scoop\apps\flow-launcher\current\Flow Launcher.exe"
+}
+
+foreach ($name in $startupApps.Keys) {
+    $exe = $startupApps[$name]
+    if (Test-Path $exe) {
+        Set-ItemProperty -Path $runKey -Name $name -Value "`"$exe`""
+        Write-Host "  Startup registered: $name" -ForegroundColor Green
+    } else {
+        Write-Warning "  Executable not found, skipping startup for $name`: $exe"
+    }
+}
+
+Write-Host "`nDone! Log out and back in to start apps automatically." -ForegroundColor Cyan
