@@ -102,15 +102,4 @@ foreach ($name in $startupApps.Keys) {
     }
 }
 
-# Remove duplicate shortcuts from shell:Startup folder
-$startupFolder = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
-$shortcutsToRemove = @("GlazeWM.lnk", "Flow Launcher.lnk")
-foreach ($shortcut in $shortcutsToRemove) {
-    $path = Join-Path $startupFolder $shortcut
-    if (Test-Path $path) {
-        Remove-Item $path -Force
-        Write-Host "  Removed startup shortcut: $shortcut" -ForegroundColor Green
-    }
-}
-
 Write-Host "`nDone! Log out and back in to start apps automatically." -ForegroundColor Cyan
