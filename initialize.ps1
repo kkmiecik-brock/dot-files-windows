@@ -1,4 +1,3 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
     Initializes a Windows environment with GlazeWM, YASB, and dotfile configs.
