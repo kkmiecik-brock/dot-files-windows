@@ -33,7 +33,7 @@ scoop bucket add glzr https://github.com/glzr-io/scoop-glzr 2>$null
 
 # ── 3. Apps ───────────────────────────────────────────────────────────────────
 
-$apps = @("glazewm", "yasb")
+$apps = @("glazewm", "yasb", "flow-launcher")
 foreach ($app in $apps) {
     if (scoop list $app 2>$null | Select-String $app) {
         Write-Host "$app already installed." -ForegroundColor Green
@@ -72,5 +72,7 @@ Copy-Dotfile ".glzr\glazewm\config.yaml"
 Copy-Dotfile ".config\yasb\config.yaml"
 Copy-Dotfile ".config\yasb\styles.css"
 Copy-Dotfile ".config\yasb\hide_taskbar.py"
+Copy-Dotfile "AppData\Roaming\FlowLauncher\Settings\Settings.json"
+Copy-Dotfile "AppData\Roaming\FlowLauncher\Themes\Catppuccin Mocha.xaml"
 
 Write-Host "`nDone! Restart GlazeWM and YASB to apply changes." -ForegroundColor Cyan
