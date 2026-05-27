@@ -161,7 +161,7 @@
   "CustomShortcuts": [],
   "DontPromptUpdateMsg": false,
   "EnableUpdateLog": false,
-  "StartFlowLauncherOnSystemStartup": true,
+  "StartFlowLauncherOnSystemStartup": false,
   "UseLogonTaskForStartup": false,
   "HideOnStartup": true,
   "HideNotifyIcon": false,

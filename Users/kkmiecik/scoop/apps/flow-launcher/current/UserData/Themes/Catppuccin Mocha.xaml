@@ -13,8 +13,8 @@ HasBlur: false
 
     <system:String x:Key="SystemBG">Dark</system:String>
     <system:Boolean x:Key="ThemeBlurEnabled">False</system:Boolean>
-    <Color x:Key="LightBG">#1E1E2E</Color>
-    <Color x:Key="DarkBG">#1E1E2E</Color>
+    <Color x:Key="LightBG">#282936</Color>
+    <Color x:Key="DarkBG">#282936</Color>
     <Thickness x:Key="ResultMargin">0 0 0 8</Thickness>
 
     <Style
@@ -53,7 +53,7 @@ HasBlur: false
         <Setter Property="BorderThickness" Value="2" />
         <Setter Property="BorderBrush" Value="#CBA6F7" />
         <Setter Property="CornerRadius" Value="8" />
-        <Setter Property="Background" Value="#1E1E2E" />
+        <Setter Property="Background" Value="#282936" />
     </Style>
 
     <Style

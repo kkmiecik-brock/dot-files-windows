@@ -39,7 +39,7 @@
 * {
 	font-size: 12px;
 	color: #cdd6f4;
-	font-weight: 900;
+    font-weight: 600;
 	font-family: "JetBrainsMono NFP";
 	margin: 0;
 	padding: 0;
@@ -82,6 +82,18 @@
     border-radius: 0;
 }
 
+.taskbar-widget {
+    padding: 0 2px;
+    background-color: transparent;
+}
+
+.taskbar-widget .widget-container {
+    background-color: transparent;
+    margin: 3px 0;
+    padding: 0 2px;
+    border-radius: 8px;
+}
+
 /* -------------------------------------------------------------------------------------------------- */
 /* 3. Widgets                                                                                         */
 /* -------------------------------------------------------------------------------------------------- */
@@ -95,7 +107,7 @@
     color: rgb(205, 214, 244);
     font-size: 12px;
     padding: 0 4px;
-    font-weight: 900;
+    font-weight: 400;
 }
 .glazewm-workspaces .ws-btn {
     border: none;
@@ -117,6 +129,73 @@
     width: 28px;
     height: 10px;
     border-radius: 5px;
+}
+
+/***-----------------------------------      • Taskbar •      ------------------------------------***/
+
+.taskbar-widget .app-container {
+    background-color: transparent;
+    border: none;
+    border-radius: 4px;
+    margin: 0px 2px;
+    padding: 1;
+    min-height: 16px;
+    min-width: 16px;
+}
+
+.taskbar-widget .app-container.running {
+    background-color: transparent;
+}
+
+.taskbar-widget .app-container.foreground {
+    background-color: var(--mauve);
+}
+
+.taskbar-widget .app-container.flashing {
+    background-color: rgba(243, 139, 168, 0.14);
+}
+
+.taskbar-widget .app-container:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+
+.taskbar-widget .app-container.foreground:hover {
+    background-color: var(--mauve);
+}
+
+.taskbar-widget .app-icon {
+    padding: 0;
+    margin: 0;
+    min-width: 16px;
+    max-width: 16px;
+    min-height: 16px;
+    max-height: 16px;
+}
+
+.taskbar-widget .app-title {
+    color: var(--text);
+    padding-left: 6px;
+}
+
+.taskbar-preview {
+    background-color: var(--mantle);
+    border: 1px solid var(--mauve);
+    border-radius: 8px;
+}
+
+.taskbar-preview .header .title {
+    color: var(--text);
+}
+
+.taskbar-preview .close-button {
+    border: none;
+    border-radius: 6px;
+    background-color: transparent;
+    color: var(--text);
+}
+
+.taskbar-preview .close-button:hover {
+    background-color: rgba(255, 255, 255, 0.1);
 }
 
 /***---------------------------------      • Audio Widget •      ----------------------------------***/
@@ -178,7 +257,7 @@
 .power-menu-popup .button .label {
 	margin-bottom: 0px;
 	font-size: 16px;
-	font-weight: 600;
+    font-weight: 400;
 	color: var(--text);
 }
 .power-menu-popup .button .icon {
@@ -292,7 +371,7 @@
 .systray .unpinned-visibility-btn {
 	color: var(--mauve);
 	font-size: 14px;
-	font-weight: 900;
+    font-weight: 400;
 	padding: 0 2px 1px 2px;
 }
 
@@ -341,11 +420,11 @@
 }
 .weather-card-today .label.location {
 	font-size: 24px;
-	font-weight: 800;
+    font-weight: 600;
 }
 .weather-card-today .label.alert {
 	font-size: 12px;
-	font-weight: 700;
+    font-weight: 500;
 	background-color: rgba(247, 199, 42, 0.05);
 	border: 1px solid rgba(247, 209, 42, 0.1);
 	color: rgba(196, 181, 162, 0.85);
@@ -409,7 +488,7 @@
 .calendar .date-label {
 	font-size: 16px;
 	color: var(--text);
-	font-weight: 700;
+    font-weight: 500;
 	min-width: 180px;
 	max-width: 180px;
 }
@@ -419,7 +498,7 @@
 }
 .calendar .date-label {
 	font-size: 88px;
-	font-weight: 900;
+    font-weight: 700;
 	color: var(--text);
 	margin-top: -20px;
 }
@@ -433,7 +512,7 @@
 .home-menu .menu-item {
 	padding: 8px 48px 8px 12px;
 	font-size: 13px;
-	font-weight: 600;
+    font-weight: 400;
 }
 .home-menu .menu-item:hover {
 	background-color: #cba6f4;
@@ -613,7 +692,7 @@
 .update-check-widget .widget-container.windows .label {
     margin: 0 6px 0 1px;
     color: var(--text);
-    font-weight: 900;
+    font-weight: 600;
     font-size: 14px;
 }
 
@@ -647,59 +726,86 @@ color: rgb(203, 166, 247);
     font-size: 16px;
     color: rgb(203, 166, 247);
 }
+
 /* Notes Widget Menu */
 .notes-menu {
     min-width: 400px;
     max-width: 400px;
     background-color: #1e1e2e;
+    border: 1px solid rgb(203, 166, 247);
+    border-radius: 8px;
+    padding: 18px;
+}
+.notes-menu * {
+    font-family: 'Segoe UI';
+}
+
+.notes-menu > *:first-child {
+    margin-top: 0;
 }
 .notes-menu .note-item {
     background-color:transparent;
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 10px;
+    margin: 4px 0;
+    min-height: 36px;
 }
 .notes-menu .note-item:hover {
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 4px;
+}
+.notes-menu .note-item:last-child {
+    border-bottom: none;
 }
 .notes-menu .note-item .icon {
     font-size: 16px;
-    padding: 0 4px;
+    padding: 0 6px;
     color: rgb(203, 166, 247);
+    margin-right: 4px;
 }
 .notes-menu .delete-button {
-    color: #ff6b6b;
+    color: var(--red);
     background: transparent;
     border: none;
-    font-size: 8px;
-    padding: 7px 8px;
-    border-radius: 3px;
+    font-size: 12px;
+    font-family: 'Segoe UI';
+    padding: 6px;
+    border-radius: 4px;
+    margin-left: 4px;
 }
 .notes-menu .delete-button:hover {
-    background-color: rgba(128, 128, 128, 0.5);
+    background-color: rgba(255, 255, 255, 0.1);
 }
 .notes-menu .note-item .title {
     font-size: 13px;
     font-family: 'Segoe UI';
+    line-height: 1.5;
+    padding: 2px 0;
 }
 .notes-menu .note-item .date {
     font-size: 12px;
     font-family: 'Segoe UI';
     color: rgba(255, 255, 255, 0.4);
+    margin: 2px 0;
 }
 .notes-menu .empty-list {
     font-family: 'Segoe UI';
     color: rgb(203, 166, 247);
-    font-size: 24px;
-    font-weight: 600;
-    padding: 10px 0 20px 0;     
+    font-size: 18px;
+    font-weight: 400;
+    padding: 20px;
+    text-align: center;
 }
 .notes-menu .add-button,  
 .notes-menu .cancel-button {
-    padding: 8px;
+    padding: 8px 16px;
     background-color: rgba(255, 255, 255, 0.1);
     border: none;
     border-radius: 4px;
     color: white;
     font-family: 'Segoe UI';
+    margin: 8px 4px 4px 0;
+    cursor: pointer;
 }
 .notes-menu .cancel-button {
     margin-left: 4px;
@@ -712,6 +818,17 @@ color: rgb(203, 166, 247);
     background: transparent; 
     border: none; 
     border-radius:0;
+    padding: 4px 0;
+}
+
+.notes-menu .note-list {
+    margin: 8px 0;
+}
+
+.notes-menu .header {
+    padding-bottom: 14px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid rgba(203, 166, 247, 0.2);
 }
 .notes-menu .note-input {
     background-color:rgba(17, 17, 27, 0.2);
@@ -719,12 +836,365 @@ color: rgb(203, 166, 247);
     font-family: 'Segoe UI';
     font-size: 14px;
     max-height: 30px;
-    padding: 4px;
+    padding: 6px;
     border-radius: 6px;
+    margin: 6px 0;
 }
 .note-input:focus {
     border: 1px solid rgb(203, 166, 247);
 }
+
+/* ================================================================================================== */
+/* TODO WIDGET STYLES                                                                                */
+/* ================================================================================================== */
+/*
+ * Structure:
+ * 1. Widget in Bar (.todo-widget)
+ * 2. Main Menu Container (.todo-menu)
+ * 3. Header Section (.header, .add-task-button, .tab-buttons)
+ * 4. Task Items (.task-item, .task-checkbox, .task-info-row)
+ * 5. Empty State (.no-tasks, .no-tasks-icon)
+ * 6. Add/Edit Dialog (.app-dialog, inputs, buttons)
+ */
+
+/* Widget in Bar */
+.todo-widget {
+    padding: 0 10px;
+}
+
+.todo-widget .icon {
+    color: rgb(203, 166, 247);
+    font-size: 16px;
+}
+
+.todo-widget .label {
+    color: rgb(203, 166, 247);
+    font-size: 14px;
+}
+
+/* Main Container */
+.todo-menu {
+    min-width: 400px;
+    max-width: 400px;
+    background-color: #1e1e2e;
+    border: 1px solid rgb(203, 166, 247);
+    border-radius: 8px;
+    padding: 18px;
+    font-family: 'Segoe UI';
+}
+
+.todo-menu * {
+    font-family: 'Segoe UI';
+}
+
+/* -------------------------------------------------------------------------------------------------- */
+/* Header Section                                                                                     */
+/* -------------------------------------------------------------------------------------------------- */
+
+.todo-menu .header {
+    padding-bottom: 16px;
+    margin-bottom: 16px;
+}
+
+.todo-menu .header .add-task-button {
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 500;
+    padding: 6px;
+    margin-bottom: 12px;
+    cursor: pointer;
+}
+
+.todo-menu .header .add-task-button:hover {
+    color: rgb(203, 166, 247);
+}
+
+/* Tab Buttons */
+.todo-menu .header .tab-buttons {
+    background-color: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(203, 166, 247, 0.3);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 8px;
+    margin-right: 6px;
+    min-width: 110px;
+    cursor: pointer;
+    text-align: center;
+}
+
+.todo-menu .header .tab-buttons:hover {
+    background-color: rgba(203, 166, 247, 0.2);
+}
+
+.todo-menu .header .tab-buttons:checked {
+    background-color: rgb(203, 166, 247);
+    color: #1e1e2e;
+}
+
+.todo-menu .header .tab-buttons.sort {
+    min-width: 36px;
+    max-width: 36px;
+    padding: 8px;
+}
+
+/* -------------------------------------------------------------------------------------------------- */
+/* Task Items                                                                                         */
+/* -------------------------------------------------------------------------------------------------- */
+
+.todo-menu .task-item {
+    background: transparent;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    padding: 10px;
+    margin: 4px 0;
+}
+
+.todo-menu .task-item:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.todo-menu .task-item:last-child {
+    border-bottom: none;
+}
+
+.todo-menu .task-checkbox {
+    margin-right: 10px;
+}
+
+.todo-menu .task-item .title {
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.5;
+    padding: 2px 0;
+}
+
+.todo-menu .task-item .description {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 12px;
+    padding: 4px 0;
+}
+
+/* Task Info Row */
+.todo-menu .task-info-row {
+    padding: 6px 0;
+    margin-top: 6px;
+}
+
+.todo-menu .task-info-row .date-text,
+.todo-menu .task-info-row .category-text {
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 11px;
+    margin-right: 14px;
+}
+
+.todo-menu .task-info-row .date-icon,
+.todo-menu .task-info-row .category-icon {
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 12px;
+    margin-right: 4px;
+}
+
+.todo-menu .task-info-row .edit-task-button,
+.todo-menu .task-info-row .delete-task-button {
+    background: rgba(255, 255, 255, 0.05);
+    border: none;
+    border-radius: 4px;
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 11px;
+    padding: 6px;
+    margin-left: 6px;
+    cursor: pointer;
+}
+
+.todo-menu .task-info-row .delete-task-button {
+    color: var(--red);
+}
+
+.todo-menu .task-info-row .edit-task-button:hover,
+.todo-menu .task-info-row .delete-task-button:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* -------------------------------------------------------------------------------------------------- */
+/* Empty State                                                                                        */
+/* -------------------------------------------------------------------------------------------------- */
+
+.todo-menu .no-tasks {
+    color: rgb(203, 166, 247);
+    font-size: 16px;
+    font-weight: 400;
+    padding: 20px;
+    text-align: center;
+}
+
+.todo-menu .no-tasks-icon {
+    color: rgb(203, 166, 247);
+    font-size: 48px;
+    opacity: 0.5;
+}
+
+/* -------------------------------------------------------------------------------------------------- */
+/* Add/Edit Dialog                                                                                    */
+/* -------------------------------------------------------------------------------------------------- */
+
+.todo-menu .app-dialog {
+    background-color: #1e1e2e;
+    padding: 20px;
+}
+
+/* Input Fields */
+.todo-menu .app-dialog .title-field,
+.todo-menu .app-dialog .desc-field {
+    background-color: rgba(17, 17, 27, 0.2);
+    border: 1px solid rgb(203, 166, 247);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 14px;
+    padding: 6px;
+    margin: 6px 0;
+}
+
+.todo-menu .app-dialog .title-field {
+    max-height: 30px;
+    min-height: 30px;
+}
+
+.todo-menu .app-dialog .desc-field {
+    min-height: 60px;
+    max-height: 100px;
+}
+
+.todo-menu .app-dialog .title-field:focus,
+.todo-menu .app-dialog .desc-field:focus {
+    border-color: rgb(203, 166, 247);
+    outline: none;
+}
+
+/* Category Buttons */
+.todo-menu .app-dialog .category-button {
+    background-color: rgba(203, 166, 247, 0.1);
+    border: 1px solid rgba(203, 166, 247, 0.3);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 12px;
+    padding: 8px;
+    margin: 4px;
+    cursor: pointer;
+}
+
+.todo-menu .app-dialog .category-button:hover {
+    background-color: rgba(203, 166, 247, 0.2);
+}
+
+.todo-menu .app-dialog .category-button:checked {
+    background-color: rgb(203, 166, 247);
+    color: #1e1e2e;
+}
+
+/* Action Buttons */
+.todo-menu .app-dialog .button {
+    background-color: rgba(203, 166, 247, 0.2);
+    border: 1px solid rgb(203, 166, 247);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+    padding: 8px 16px;
+    margin: 8px 4px 4px 0;
+    cursor: pointer;
+}
+
+.todo-menu .app-dialog .button:hover {
+    background-color: rgb(203, 166, 247);
+    color: #1e1e2e;
+}
+
+.todo-menu .app-dialog .button:pressed {
+    background-color: rgba(203, 166, 247, 0.8);
+}
+
+.todo-menu .app-dialog .buttons-container {
+    padding: 14px;
+    margin-top: 14px;
+}
+
+.todo-menu .app-dialog .buttons-container .button {
+    margin: 0 4px 0 0;
+    min-width: 120px;
+}
+
+/* -------------------------------------------------------------------------------------------------- */
+/* Dropdown Menus (Sort/Filter)                                                                       */
+/* -------------------------------------------------------------------------------------------------- */
+
+.todo-menu QMenu,
+QMenu[class="context-menu"] {
+    background-color: #1e1e2e;
+    border: 1px solid rgb(203, 166, 247);
+    border-radius: 8px;
+    padding: 6px;
+    font-family: 'Segoe UI';
+}
+
+.todo-menu QMenu::item,
+QMenu[class="context-menu"]::item {
+    background-color: transparent;
+    color: var(--text);
+    padding: 8px 12px;
+    margin: 2px 4px;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.todo-menu QMenu::item:selected,
+QMenu[class="context-menu"]::item:selected {
+    background-color: rgba(203, 166, 247, 0.3);
+    color: var(--text);
+}
+
+.todo-menu QMenu::item:hover,
+QMenu[class="context-menu"]::item:hover {
+    background-color: rgba(203, 166, 247, 0.2);
+}
+
+.todo-menu QMenu::item:checked,
+.todo-menu QMenu::item.selected,
+.todo-menu QMenu::item:selected:checked,
+QMenu[class="context-menu"]::item:checked,
+QMenu[class="context-menu"]::item.selected,
+QMenu[class="context-menu"]::item:selected:checked {
+    background-color: rgba(203, 166, 247, 0.15);
+    color: var(--text);
+    font-weight: 500;
+    border-left: 3px solid rgb(203, 166, 247);
+    padding-left: 9px;
+}
+
+.todo-menu QMenu::indicator,
+QMenu[class="context-menu"]::indicator {
+    width: 0;
+    height: 0;
+}
+
+.todo-menu QMenu::indicator:exclusive:checked,
+.todo-menu QMenu::indicator:exclusive:unchecked,
+QMenu[class="context-menu"]::indicator:exclusive:checked,
+QMenu[class="context-menu"]::indicator:exclusive:unchecked {
+    width: 0;
+    height: 0;
+}
+
+.todo-menu QMenu::separator,
+QMenu[class="context-menu"]::separator {
+    height: 1px;
+    background-color: rgba(203, 166, 247, 0.2);
+    margin: 4px 8px;
+}
+
+
 
 .media-menu {
     min-width: 420px;

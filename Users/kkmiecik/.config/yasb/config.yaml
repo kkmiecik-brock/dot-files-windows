@@ -47,11 +47,13 @@ bars:
       center:
         [
           "glazewm_workspaces",
-          "active_window",
+          "taskbar",
+          #"active_window",
         ]
       right:
         [
           "notes",
+          "todo",
           #"weather",
           "clock",
           # "cava",
@@ -69,6 +71,77 @@ widgets:
       offline_label: "GlazeWM Offline"
       hide_empty_workspaces: true
       hide_if_offline: false
+  todo:
+    type: "yasb.todo.TodoWidget"
+    options:
+      label: "\uf0ae {count}/{completed}"
+      label_alt: "\uf0ae {count} tasks"
+      # data_path: "~/Documents/my-todos.json"  # Optional: custom JSON file path
+      menu:
+        blur: true
+        round_corners: true
+        round_corners_type: "normal"
+        border_color: "#cba6f7"
+        alignment: "right"
+        direction: "down"
+        offset_top: 6
+        offset_left: 0
+      icons:
+        add: "\uf501   New Task"
+        edit: "Edit"
+        delete: "Delete"
+        date: "\ue641"
+        category: "\uf412"
+        checked: "\udb80\udd34"
+        unchecked: "\udb80\udd30"
+        sort: "\ueab4"
+        no_tasks: "\uf4a0"
+      categories:
+        default:
+          label: "general"
+        soon:
+          label: "complete soon"
+        today:
+          label: "end of day"
+        urgent:
+          label: "urgent"
+        important:
+          label: "important"
+      callbacks:
+        on_left: "toggle_menu"
+        on_middle: "do_nothing"
+        on_right: "toggle_label"
+  taskbar:
+    type: "yasb.taskbar.TaskbarWidget"
+    options:
+      icon_size: 16
+      tooltip: true
+      show_only_visible: true
+      strict_filtering: true
+      monitor_exclusive: true
+      hide_empty: true
+      title_label:
+        enabled: false
+        show: "focused"
+        min_length: 10
+        max_length: 30
+      animation:
+        enabled: true
+        duration: 200
+      preview:
+        enabled: true
+        width: 600
+        delay: 200
+        padding: 8
+        margin: 8
+      ignore_apps:
+        processes: []
+        titles: []
+        classes: []
+      callbacks:
+        on_left: "toggle_window"
+        on_middle: "do_nothing"
+        on_right: "context_menu"
   wallpaper:
     type: "yasb.wallpapers.WallpapersWidget"
     options:
