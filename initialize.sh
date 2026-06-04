@@ -48,14 +48,38 @@ copy_dotfile() {
     echo "  OK: $rel"
 }
 
+copy_flow_dotfile() {
+    local rel="$1"
+    local flow_app_dir="$2"
+    local src="$DOTFILES_SRC/scoop/apps/flow-launcher/current/$rel"
+    local dst="$flow_app_dir/$rel"
+
+    if [[ ! -f "$src" ]]; then
+        echo "  SKIP (not found): scoop/apps/flow-launcher/current/$rel"
+        return
+    fi
+
+    mkdir -p "$(dirname "$dst")"
+    cp -f "$src" "$dst"
+    echo "  OK: flow-launcher/$rel"
+}
+
 echo "Copying dotfiles..."
 
 copy_dotfile ".glzr/glazewm/config.yaml"
 copy_dotfile ".config/yasb/config.yaml"
 copy_dotfile ".config/yasb/styles.css"
 copy_dotfile ".config/yasb/hide_taskbar.py"
-copy_dotfile "AppData/Roaming/FlowLauncher/Settings/Settings.json"
-copy_dotfile "AppData/Roaming/FlowLauncher/Themes/Catppuccin Mocha.xaml"
+
+flow_current_dir="$WIN_HOME/scoop/apps/flow-launcher/current"
+flow_app_dir="$(find "$flow_current_dir" -maxdepth 1 -mindepth 1 -type d -name 'app-*' | sort | tail -n1 || true)"
+
+if [[ -z "$flow_app_dir" ]]; then
+    echo "  SKIP Flow Launcher (app-* dir not found under $flow_current_dir)"
+else
+    copy_flow_dotfile "UserData/Settings/Settings.json" "$flow_app_dir"
+    copy_flow_dotfile "UserData/Themes/Catppuccin Mocha.xaml" "$flow_app_dir"
+fi
 
 echo ""
 echo "Done! Restart GlazeWM, YASB, and Flow Launcher to apply changes."

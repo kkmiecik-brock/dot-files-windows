@@ -50,7 +50,7 @@ HasBlur: false
         x:Key="WindowBorderStyle"
         BasedOn="{StaticResource BaseWindowBorderStyle}"
         TargetType="{x:Type Border}">
-        <Setter Property="BorderThickness" Value="2" />
+        <Setter Property="BorderThickness" Value="0" />
         <Setter Property="BorderBrush" Value="#CBA6F7" />
         <Setter Property="CornerRadius" Value="8" />
         <Setter Property="Background" Value="#282936" />
