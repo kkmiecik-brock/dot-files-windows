@@ -47,7 +47,8 @@ bars:
       center:
         [
           "glazewm_workspaces",
-          "taskbar",
+          "glazewm_tiling_direction",
+          "taskbar"
           #"active_window",
         ]
       right:
@@ -65,6 +66,11 @@ bars:
           "power_menu"
         ]
 widgets:
+  glazewm_tiling_direction:
+   type: "glazewm.tiling_direction.GlazewmTilingDirectionWidget"
+   options:
+    horizontal_label: "\udb81\udce1"
+    vertical_label: "\udb81\udce2"
   glazewm_workspaces:
     type: "glazewm.workspaces.GlazewmWorkspacesWidget"
     options:
