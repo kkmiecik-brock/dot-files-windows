@@ -126,68 +126,36 @@ Write-Host "`nConfiguring startup entries..." -ForegroundColor Cyan
 
 $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $startupApprovedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
-$glazeWmTaskName = "GlazeWM Startup"
-$flowLauncherTaskName = "Flow Launcher Startup"
-
-if (-not (Test-Path $startupApprovedKey)) {
-    New-Item -Path $startupApprovedKey -Force | Out-Null
-}
-
-function Enable-StartupApp {
-    param (
-        [string]$Name
-    )
-
-    $enabledValue = [byte[]](0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-    Set-ItemProperty -Path $startupApprovedKey -Name $Name -Value $enabledValue -Type Binary
-}
-
-function Register-RunStartupApp {
-    param (
-        [string]$Name,
-        [string]$ExecutablePath
-    )
-
-    if (-not (Test-Path $ExecutablePath)) {
-        Write-Warning "  Executable not found for $Name`: $ExecutablePath - entry will still be registered."
-    }
-
-    Set-ItemProperty -Path $runKey -Name $Name -Value "`"$ExecutablePath`""
-    Enable-StartupApp -Name $Name
-    Write-Host "  Startup registered: $Name -> $ExecutablePath" -ForegroundColor Green
-}
-
-function Remove-StartupTask {
-    param (
-        [string]$TaskName
-    )
-
-    try {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
-        Write-Host "  Removed startup task: $TaskName" -ForegroundColor Green
-    } catch {
-        if ($_.Exception.Message -notmatch "cannot find the file|No MSFT_ScheduledTask objects found") {
-            Write-Warning "  Failed to remove ${TaskName}: $($_.Exception.Message)"
-        }
-    }
-}
 
 $glazeWmExe = "$env:USERPROFILE\scoop\apps\glazewm\current\glazewm.exe"
-$flowLauncherExe = "$env:USERPROFILE\scoop\apps\flow-launcher\current\Flow.Launcher.exe"
 
-Remove-StartupTask -TaskName $glazeWmTaskName
-Remove-StartupTask -TaskName $flowLauncherTaskName
+# Remove Run key entries that GlazeWM now manages via startup_commands
+foreach ($name in @("GlazeWM", "FlowLauncher", "Flow.Launcher", "Teams")) {
+    Remove-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path $startupApprovedKey -Name $name -ErrorAction SilentlyContinue
+}
+Write-Host "  Cleaned up Run key entries for GlazeWM, Flow Launcher, and Teams." -ForegroundColor Green
 
-Remove-ItemProperty -Path $runKey -Name "GlazeWM" -ErrorAction SilentlyContinue
-Remove-ItemProperty -Path $startupApprovedKey -Name "GlazeWM" -ErrorAction SilentlyContinue
-Register-RunStartupApp -Name "GlazeWM" -ExecutablePath $glazeWmExe
-
-if (Test-Path $flowLauncherExe) {
-    Remove-ItemProperty -Path $runKey -Name "FlowLauncher" -ErrorAction SilentlyContinue
-    Remove-ItemProperty -Path $startupApprovedKey -Name "FlowLauncher" -ErrorAction SilentlyContinue
-    Register-RunStartupApp -Name "FlowLauncher" -ExecutablePath $flowLauncherExe
-} else {
-    Write-Warning "  Flow Launcher executable not found: $flowLauncherExe"
+# Remove legacy task names if they exist
+foreach ($oldTask in @("GlazeWM Startup", "Flow Launcher Startup")) {
+    try {
+        Unregister-ScheduledTask -TaskName $oldTask -Confirm:$false -ErrorAction Stop
+        Write-Host "  Removed legacy task: $oldTask" -ForegroundColor Green
+    } catch { }
 }
 
-Write-Host "`nDone! Log out and back in to start apps automatically." -ForegroundColor Cyan
+# Register GlazeWM as a Task Scheduler task (fires at logon before Run key apps)
+Write-Host "  Registering GlazeWM as a Task Scheduler task..." -ForegroundColor Cyan
+try {
+    $action    = New-ScheduledTaskAction -Execute $glazeWmExe
+    $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -Priority 0
+    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName "GlazeWM" -TaskPath "\" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+    Write-Host "  GlazeWM Task Scheduler task registered." -ForegroundColor Green
+} catch {
+    Write-Warning "  Could not create Task Scheduler task (requires admin): $($_.Exception.Message)"
+    Write-Warning "  Run this script as Administrator, or create the task manually in Task Scheduler."
+}
+
+Write-Host "`nDone! Log out and back in to start GlazeWM automatically." -ForegroundColor Cyan

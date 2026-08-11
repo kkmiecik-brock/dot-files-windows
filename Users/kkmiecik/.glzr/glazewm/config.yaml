@@ -21,6 +21,9 @@ general:
   # script or launching another application.
   # Example: The below command launches yasb.
   startup_commands:
+    - 'shell-exec C:\Users\kkmiecik\scoop\apps\flow-launcher\current\Flow.Launcher.exe'
+    - 'shell-exec C:\PROGRA~2\MICROS~1\Edge\APPLIC~1\msedge.exe --app=https://teams.cloud.microsoft/ -inprivate'
+    - 'shell-exec powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Milliseconds 250; Start-Process C:\Users\kkmiecik\AppData\Local\Microsoft\WindowsApps\MSTeams_8wekyb3d8bbwe\ms-teams.exe"'
     - 'shell-exec yasb'
     - 'shell-exec C:\Users\kkmiecik\AppData\Local\Programs\Python\Python313\pythonw.exe C:\Users\kkmiecik\.config\yasb\hide_taskbar.py'
 
@@ -163,6 +166,13 @@ workspaces:
     bind_to_monitor: 2
 
 window_rules:
+  - commands: ['move --workspace 1']
+    match:
+      - window_process: { equals: 'ms-teams' }
+        window_title: { not_regex: 'Microsoft Teams Notification' }
+      - window_process: { equals: 'msedge' }
+        window_title: { regex: 'Microsoft Teams' }
+
   - commands: ["set-floating"]
     match:
     - window_process: { equals: 'explorer' }
