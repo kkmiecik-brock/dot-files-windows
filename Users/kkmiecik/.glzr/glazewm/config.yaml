@@ -23,15 +23,17 @@ general:
   startup_commands:
     - 'shell-exec C:\Users\kkmiecik\scoop\apps\flow-launcher\current\Flow.Launcher.exe'
     - 'shell-exec C:\PROGRA~2\MICROS~1\Edge\APPLIC~1\msedge.exe --app=https://teams.cloud.microsoft/ -inprivate'
-    - 'shell-exec powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Milliseconds 250; Start-Process C:\Users\kkmiecik\AppData\Local\Microsoft\WindowsApps\MSTeams_8wekyb3d8bbwe\ms-teams.exe"'
-    - 'shell-exec yasb'
+    - 'shell-exec wscript C:\Users\kkmiecik\.glzr\glazewm\launch-teams-delayed.vbs'
+    - 'shell-exec C:\Users\kkmiecik\AppData\Local\Programs\Python\Python313\pythonw.exe C:\Users\kkmiecik\.glzr\glazewm\super-drag.py'
     - 'shell-exec C:\Users\kkmiecik\AppData\Local\Programs\Python\Python313\pythonw.exe C:\Users\kkmiecik\.config\yasb\hide_taskbar.py'
+    - 'shell-exec yasb'
 
   # Commands to run just before the WM is shutdown.
   # Example: The below command kills Zebar.
   shutdown_commands:
     - 'shell-exec taskkill /IM yasb.exe /F'
     - 'shell-exec powershell -NoProfile -WindowStyle Hidden -Command "$procs = Get-CimInstance Win32_Process | Where-Object { ($_.Name -match ''^python(\.exe)?$'' -or $_.Name -eq ''pythonw.exe'') -and $_.CommandLine -match ''hide_taskbar\.py'' }; if ($procs) { $procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }"'
+    - 'shell-exec powershell -NoProfile -WindowStyle Hidden -Command "$procs = Get-CimInstance Win32_Process | Where-Object { ($_.Name -match ''^python(\.exe)?$'' -or $_.Name -eq ''pythonw.exe'') -and $_.CommandLine -match ''super-drag\.py'' }; if ($procs) { $procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }"'
 
   # Commands to run after the WM config is reloaded.
   config_reload_commands: []
@@ -147,22 +149,24 @@ window_behavior:
 
 workspaces:
   - name: '1'
-    bind_to_monitor: 1
+    bind_to_monitor: 0
   - name: '2'
-    bind_to_monitor: 1
+    bind_to_monitor: 0
   - name: '3'
-    bind_to_monitor: 1
+    bind_to_monitor: 0
   - name: '4'
-    bind_to_monitor: 1
+    bind_to_monitor: 0
   - name: '5'
-    bind_to_monitor: 1
+    bind_to_monitor: 0
   - name: '6'
-    bind_to_monitor: 1
+    bind_to_monitor: 0
   - name: '7'
-    bind_to_monitor: 1
+    bind_to_monitor: 0
   - name: '8'
-    bind_to_monitor: 1
+    bind_to_monitor: 0
   - name: '9'
+    bind_to_monitor: 1
+  - name: '10'
     bind_to_monitor: 2
 
 window_rules:
@@ -180,6 +184,7 @@ window_rules:
     - window_title: { equals: "Calculator" }
     - window_process: { equals: "Taskmgr" }
     - window_class: { equals: "SnagIt9Editor"}
+    - window_process: { equals: "Windows365" }
     
   - commands: ['ignore']
     match:
@@ -206,6 +211,28 @@ window_rules:
       - window_process: { equals: 'POWERPNT' }
         window_class: { not_regex: 'PPTFrameClass' }
 
+      # Teams notification/popup windows
+      - window_process: { equals: 'ms-teams' }
+        window_title: { regex: 'Microsoft Teams Notification' }
+      
+      # VS Code dialog windows (avoid tiling small dialogs)
+      - window_process: { equals: 'Code' }
+        window_class: { equals: 'Chrome_WidgetWin_0' }
+      
+      # Remote Desktop credential/connection dialogs
+      - window_process: { regex: 'msrdc|Windows365' }
+        window_class: { regex: 'Credential|#32770' }
+      
+      # Browser save/download dialogs and popups
+      - window_process: { regex: 'firefox|msedge|chrome' }
+        window_class: { equals: '#32770' }
+      - window_process: { regex: 'firefox|msedge|chrome' }
+        window_title: { regex: '[Ss]ave [Aa]s|[Oo]pen|[Dd]ownload' }
+      
+      # File Explorer property windows and dialogs
+      - window_process: { equals: 'explorer' }
+        window_title: { regex: 'Properties|Copy|Move|Delete' }
+
 binding_modes:
   - name: 'resize'
     keybindings:
@@ -222,7 +249,7 @@ binding_modes:
 
 keybindings:
   # Launch Terminal 
-  - commands: ['shell-exec powershell']
+  - commands: ['shell-exec wt']
     bindings: ['alt+t']
 
   # Launch Explorer

@@ -99,6 +99,8 @@ function Copy-FlowDotfile {
 Write-Host "`nCopying dotfiles..." -ForegroundColor Cyan
 
 Copy-Dotfile ".glzr\glazewm\config.yaml"
+Copy-Dotfile ".glzr\glazewm\launch-teams-delayed.vbs"
+Copy-Dotfile ".glzr\glazewm\super-drag.py"
 Copy-Dotfile ".config\yasb\config.yaml"
 Copy-Dotfile ".config\yasb\styles.css"
 Copy-Dotfile ".config\yasb\hide_taskbar.py"
@@ -137,6 +139,12 @@ foreach ($name in @("FlowLauncher", "Flow.Launcher", "Teams")) {
 }
 Write-Host "  Cleaned up Run key entries for Flow Launcher and Teams." -ForegroundColor Green
 
+# Rancher Desktop is heavy (container/WSL2 backend) and not needed the instant
+# you log in - launch it manually via Flow Launcher when you need it.
+Remove-ItemProperty -Path $runKey -Name "RancherDesktop" -ErrorAction SilentlyContinue
+Remove-ItemProperty -Path $startupApprovedKey -Name "RancherDesktop" -ErrorAction SilentlyContinue
+Write-Host "  Disabled Rancher Desktop auto-start." -ForegroundColor Green
+
 # Remove legacy/task-scheduler-based GlazeWM tasks - this org's policy blocks
 # Task Scheduler-launched interactive apps (ERROR_ELEVATION_REQUIRED), so
 # GlazeWM starts via the Run key instead.
@@ -147,10 +155,17 @@ foreach ($oldTask in @("GlazeWM", "GlazeWM Startup", "Flow Launcher Startup")) {
     } catch { }
 }
 
+# The "Run these programs at user logon" policy list (Policies\Explorer\Run)
+# and the Startup folder shortcut were both tried and gave no meaningful
+# improvement over the regular Run key - the real bottleneck is system
+# resource contention during logon, not registry ordering. Use the plain
+# Run key for GlazeWM instead.
+Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run" -Name "1" -ErrorAction SilentlyContinue
+Remove-Item -Path (Join-Path ([Environment]::GetFolderPath("Startup")) "GlazeWM.lnk") -Force -ErrorAction SilentlyContinue
+
 if (-not (Test-Path $startupApprovedKey)) {
     New-Item -Path $startupApprovedKey -Force | Out-Null
 }
-
 Remove-ItemProperty -Path $runKey -Name "GlazeWM" -ErrorAction SilentlyContinue
 Set-ItemProperty -Path $runKey -Name "GlazeWM" -Value "`"$glazeWmExe`""
 $enabledValue = [byte[]](0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
