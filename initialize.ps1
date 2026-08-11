@@ -126,36 +126,40 @@ Write-Host "`nConfiguring startup entries..." -ForegroundColor Cyan
 
 $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $startupApprovedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+$serializeKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize"
 
 $glazeWmExe = "$env:USERPROFILE\scoop\apps\glazewm\current\glazewm.exe"
 
-# Remove Run key entries that GlazeWM now manages via startup_commands
-foreach ($name in @("GlazeWM", "FlowLauncher", "Flow.Launcher", "Teams")) {
+# Remove Flow Launcher/Teams Run entries; GlazeWM launches them via startup_commands
+foreach ($name in @("FlowLauncher", "Flow.Launcher", "Teams")) {
     Remove-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path $startupApprovedKey -Name $name -ErrorAction SilentlyContinue
 }
-Write-Host "  Cleaned up Run key entries for GlazeWM, Flow Launcher, and Teams." -ForegroundColor Green
+Write-Host "  Cleaned up Run key entries for Flow Launcher and Teams." -ForegroundColor Green
 
-# Remove legacy task names if they exist
-foreach ($oldTask in @("GlazeWM Startup", "Flow Launcher Startup")) {
+# Remove legacy/task-scheduler-based GlazeWM tasks - this org's policy blocks
+# Task Scheduler-launched interactive apps (ERROR_ELEVATION_REQUIRED), so
+# GlazeWM starts via the Run key instead.
+foreach ($oldTask in @("GlazeWM", "GlazeWM Startup", "Flow Launcher Startup")) {
     try {
         Unregister-ScheduledTask -TaskName $oldTask -Confirm:$false -ErrorAction Stop
         Write-Host "  Removed legacy task: $oldTask" -ForegroundColor Green
     } catch { }
 }
 
-# Register GlazeWM as a Task Scheduler task (fires at logon before Run key apps)
-Write-Host "  Registering GlazeWM as a Task Scheduler task..." -ForegroundColor Cyan
-try {
-    $action    = New-ScheduledTaskAction -Execute $glazeWmExe
-    $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -Priority 0
-    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName "GlazeWM" -TaskPath "\" -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-    Write-Host "  GlazeWM Task Scheduler task registered." -ForegroundColor Green
-} catch {
-    Write-Warning "  Could not create Task Scheduler task (requires admin): $($_.Exception.Message)"
-    Write-Warning "  Run this script as Administrator, or create the task manually in Task Scheduler."
+if (-not (Test-Path $startupApprovedKey)) {
+    New-Item -Path $startupApprovedKey -Force | Out-Null
 }
+
+Remove-ItemProperty -Path $runKey -Name "GlazeWM" -ErrorAction SilentlyContinue
+Set-ItemProperty -Path $runKey -Name "GlazeWM" -Value "`"$glazeWmExe`""
+$enabledValue = [byte[]](0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+Set-ItemProperty -Path $startupApprovedKey -Name "GlazeWM" -Value $enabledValue -Type Binary
+Write-Host "  GlazeWM registered in Run key -> $glazeWmExe" -ForegroundColor Green
+
+# Removes the ~10-30s delay Windows applies to Run key startup apps.
+if (-not (Test-Path $serializeKey)) { New-Item -Path $serializeKey -Force | Out-Null }
+Set-ItemProperty -Path $serializeKey -Name "StartupDelayInMSec" -Value 0 -Type DWord
+Write-Host "  Startup delay set to 0ms." -ForegroundColor Green
 
 Write-Host "`nDone! Log out and back in to start GlazeWM automatically." -ForegroundColor Cyan
