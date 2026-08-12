@@ -51,7 +51,6 @@ SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
-SWP_ASYNCWINDOWPOS = 0x4000
 
 MIN_SIZE = 100
 
@@ -151,21 +150,17 @@ def _begin_drag(button, x, y):
 
 def _update_drag(x, y):
     dx, dy = x - start_x, y - start_y
-    # SWP_ASYNCWINDOWPOS (matching AltSnap's MoveWindowNow) keeps SetWindowPos
-    # from blocking this thread while the target window's own thread
-    # processes WM_WINDOWPOSCHANGING/CHANGED - without it, a slow/busy target
-    # backs up our repeated calls and produces a laggy "chasing" drag.
     if drag_button == "L":
         win32gui.SetWindowPos(
             hwnd, 0, win_x + dx, win_y + dy, 0, 0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         )
     else:
         new_w = max(MIN_SIZE, win_w + dx)
         new_h = max(MIN_SIZE, win_h + dy)
         win32gui.SetWindowPos(
             hwnd, 0, 0, 0, new_w, new_h,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
         )
 
 
