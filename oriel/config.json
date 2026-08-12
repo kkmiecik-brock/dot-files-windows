@@ -1,0 +1,35 @@
+{
+  "bindings": [
+    { "modifiers": ["alt"], "key": "T", "target": "hotkeyd", "action": "launch", "args": { "target": "wt.exe" } },
+    { "modifiers": ["alt"], "key": "E", "target": "hotkeyd", "action": "launch", "args": { "target": "explorer.exe" } },
+    { "modifiers": ["alt"], "key": "B", "target": "hotkeyd", "action": "launch", "args": { "target": "firefox.exe" } },
+    { "modifiers": ["alt"], "key": "Q", "target": "hotkeyd", "action": "close_focused" },
+    { "modifiers": ["alt"], "key": "F", "target": "tiling", "action": "toggle_fullscreen" },
+    { "modifiers": ["alt", "shift"], "key": "H", "target": "tiling", "action": "focus_left" },
+    { "modifiers": ["alt", "shift"], "key": "L", "target": "tiling", "action": "focus_right" },
+    { "modifiers": ["alt", "shift"], "key": "K", "target": "tiling", "action": "focus_up" },
+    { "modifiers": ["alt", "shift"], "key": "J", "target": "tiling", "action": "focus_down" },
+    { "modifiers": ["alt", "ctrl"], "key": "H", "target": "tiling", "action": "move_left" },
+    { "modifiers": ["alt", "ctrl"], "key": "L", "target": "tiling", "action": "move_right" },
+    { "modifiers": ["alt", "ctrl"], "key": "K", "target": "tiling", "action": "move_up" },
+    { "modifiers": ["alt", "ctrl"], "key": "J", "target": "tiling", "action": "move_down" },
+    { "modifiers": ["alt", "ctrl", "shift"], "key": "L", "target": "tiling", "action": "resize_grow" },
+    { "modifiers": ["alt", "ctrl", "shift"], "key": "H", "target": "tiling", "action": "resize_shrink" },
+    { "modifiers": ["alt", "shift"], "key": "R", "target": "hotkeyd", "action": "reload_config" }
+  ],
+  "taskbar": {
+    "enabled": true,
+    "poll_interval": 1.0
+  },
+  "drag": {
+    "modifier": "alt",
+    "move_button": "left",
+    "resize_button": "right",
+    "min_size": 100
+  },
+  "tiling": {
+    "inner_gap": 10,
+    "outer_gap": { "top": 10, "right": 10, "bottom": 10, "left": 10 },
+    "cleanup_interval": 5.0
+  }
+}

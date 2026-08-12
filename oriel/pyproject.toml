@@ -1,0 +1,9 @@
+[project]
+name = "oriel"
+version = "0.1.0"
+description = "Desktop management daemons: hotkeys, BSP tiling, alt-drag, taskbar auto-hide"
+requires-python = ">=3.13"
+dependencies = ["pywin32"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

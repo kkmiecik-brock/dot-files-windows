@@ -1,9 +1,9 @@
-"""Alt+drag move/resize for any window, with GlazeWM tile-snap integration.
+"""Alt+drag move/resize for any window.
 
 Alt+Left-drag moves the window under the cursor; Alt+Right-drag resizes it.
-Manually fires the native interactive-move/resize accessibility events via
-NotifyWinEvent so GlazeWM's WinEventHook treats it as a genuine drag and can
-snap/re-tile it on release - the same technique AltSnap uses.
+Fires the native interactive-move/resize accessibility events via
+NotifyWinEvent so any listening window manager can treat it as a genuine
+drag and snap/re-tile it on release - the same technique AltSnap uses.
 
 Movement is driven by a polling loop (GetCursorPos + SetWindowPos on a tight
 sleep interval), mirroring the AHK implementation this replaces. Both a
@@ -11,10 +11,7 @@ direct WM_MOUSEMOVE hook reaction and an AltSnap-style worker-thread/message
 hybrid were tried and both reintroduced "fighting", so polling is the
 proven-working approach.
 """
-
 import ctypes
-import os
-import subprocess
 import threading
 import time
 from ctypes import wintypes
@@ -24,28 +21,17 @@ import win32con
 import win32gui
 import win32process
 
-# Without DPI awareness, Windows can virtualize/scale the coordinates this
-# process sees from GetCursorPos/GetWindowRect relative to a monitor's actual
-# scaling, while the low-level hook always reports true physical pixels -
-# that mismatch is what caused the drag offset to drift/"bounce".
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-except (AttributeError, OSError):
-    ctypes.windll.user32.SetProcessDPIAware()
+from oriel.config import get_section
+from oriel.ipc import send_action, serve_actions
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
-
-# Raise the system timer resolution to 1ms so time.sleep(0.001) in the drag
-# loop is precise instead of snapping to the default ~15.6ms tick.
-ctypes.windll.winmm.timeBeginPeriod(1)
 
 WH_MOUSE_LL = 14
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 WM_RBUTTONDOWN = 0x0204
 WM_RBUTTONUP = 0x0205
-VK_MENU = 0x12
 GA_ROOT = 2
 
 EVENT_SYSTEM_MOVESIZESTART = 0x000A
@@ -56,7 +42,22 @@ SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 
-MIN_SIZE = 100
+# VK codes to check via GetAsyncKeyState for each configurable modifier name.
+# win checks both L/R since GetAsyncKeyState has no combined VK for it.
+MODIFIER_VKS = {
+    "alt": [0x12],    # VK_MENU
+    "ctrl": [0x11],   # VK_CONTROL
+    "shift": [0x10],  # VK_SHIFT
+    "win": [0x5B, 0x5C],  # VK_LWIN, VK_RWIN
+}
+BUTTON_DOWN_MSGS = {"left": WM_LBUTTONDOWN, "right": WM_RBUTTONDOWN}
+
+DEFAULTS = {
+    "modifier": "alt",
+    "move_button": "left",
+    "resize_button": "right",
+    "min_size": 100,
+}
 
 
 class POINT(ctypes.Structure):
@@ -95,10 +96,16 @@ hwnd = None
 start_x = start_y = 0
 win_x = win_y = win_w = win_h = 0
 resize_edges = frozenset()
+settings = DEFAULTS
 
 
-def _alt_down():
-    return (user32.GetAsyncKeyState(VK_MENU) & 0x8000) != 0
+def _load_settings():
+    return {**DEFAULTS, **get_section("drag")}
+
+
+def _modifier_down():
+    vks = MODIFIER_VKS[settings["modifier"]]
+    return any((user32.GetAsyncKeyState(vk) & 0x8000) != 0 for vk in vks)
 
 
 def _force_foreground(target_hwnd):
@@ -144,7 +151,7 @@ def _begin_drag(button, x, y):
     win_x, win_y = left, top
     win_w, win_h = right - left, bottom - top
 
-    if button == "R":
+    if button == "resize":
         # Mirrors niri's resize_edges_under: split the window into thirds
         # and only move the edge(s) nearest the click - clicking dead
         # center does nothing, same as niri.
@@ -172,26 +179,27 @@ def _begin_drag(button, x, y):
 
 def _update_drag(x, y):
     dx, dy = x - start_x, y - start_y
-    if drag_button == "L":
+    if drag_button == "move":
         win32gui.SetWindowPos(
             hwnd, 0, win_x + dx, win_y + dy, 0, 0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         )
     else:
+        min_size = settings["min_size"]
         new_left, new_top = win_x, win_y
         new_w, new_h = win_w, win_h
 
         if "L" in resize_edges:
-            new_w = max(MIN_SIZE, win_w - dx)
+            new_w = max(min_size, win_w - dx)
             new_left = win_x + win_w - new_w
         elif "R" in resize_edges:
-            new_w = max(MIN_SIZE, win_w + dx)
+            new_w = max(min_size, win_w + dx)
 
         if "T" in resize_edges:
-            new_h = max(MIN_SIZE, win_h - dy)
+            new_h = max(min_size, win_h - dy)
             new_top = win_y + win_h - new_h
         elif "B" in resize_edges:
-            new_h = max(MIN_SIZE, win_h + dy)
+            new_h = max(min_size, win_h + dy)
 
         win32gui.SetWindowPos(
             hwnd, 0, new_left, new_top, new_w, new_h,
@@ -201,6 +209,10 @@ def _update_drag(x, y):
 
 def _end_drag():
     global dragging
+    # Tiling can't observe which button drove this gesture (GetAsyncKeyState
+    # can't see it - see _drag_loop's comment), so tell it directly instead
+    # of leaving it to guess from the resulting size/position delta.
+    send_action("tiling", "record_drag_kind", {"hwnd": hwnd, "kind": drag_button})
     user32.NotifyWinEvent(EVENT_SYSTEM_MOVESIZEEND, hwnd, 0, 0)
     dragging = False
 
@@ -218,9 +230,13 @@ def _drag_loop():
 
 def _mouse_proc(nCode, wParam, lParam):
     if nCode == 0:
-        if not dragging and wParam in (WM_LBUTTONDOWN, WM_RBUTTONDOWN) and _alt_down():
+        move_down = BUTTON_DOWN_MSGS.get(settings["move_button"])
+        resize_down = BUTTON_DOWN_MSGS.get(settings["resize_button"])
+
+        if not dragging and wParam in (move_down, resize_down) and _modifier_down():
             info = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-            _begin_drag("L" if wParam == WM_LBUTTONDOWN else "R", info.pt.x, info.pt.y)
+            action = "move" if wParam == move_down else "resize"
+            _begin_drag(action, info.pt.x, info.pt.y)
             if dragging:
                 return 1
         elif dragging and wParam in (WM_LBUTTONUP, WM_RBUTTONUP):
@@ -230,33 +246,37 @@ def _mouse_proc(nCode, wParam, lParam):
     return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
 
-def _kill_other_instances():
-    # If a newer instance is launched while an older one is still running,
-    # the newer one wins - kill any other process running this same script.
-    script = os.path.abspath(__file__)
-    ps_script = (
-        "$procs = Get-CimInstance Win32_Process | Where-Object { "
-        "($_.Name -match '^python(\\.exe)?$' -or $_.Name -eq 'pythonw.exe') "
-        f"-and $_.CommandLine -match [regex]::Escape('{script}') "
-        f"-and $_.ProcessId -ne {os.getpid()} }}; "
-        "if ($procs) { $procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }"
-    )
-    subprocess.run(
-        ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
-        creationflags=subprocess.CREATE_NO_WINDOW,
-        check=False,
-    )
+def _reload(_data=None):
+    global settings
+    settings = _load_settings()
 
 
-def main():
-    global hook_handle
+ACTIONS = {"reload": _reload}
 
-    _kill_other_instances()
 
+def run():
+    global hook_handle, settings
+
+    # Without DPI awareness, Windows can virtualize/scale the coordinates this
+    # process sees, causing drag offsets to drift relative to true pixels.
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except (AttributeError, OSError):
+        ctypes.windll.user32.SetProcessDPIAware()
+
+    # Raise timer resolution to 1ms so the drag-polling sleep is precise
+    # instead of snapping to the default ~15.6ms tick.
+    ctypes.windll.winmm.timeBeginPeriod(1)
+
+    settings = _load_settings()
     pointer = HOOKPROC(_mouse_proc)
     hook_handle = user32.SetWindowsHookExW(WH_MOUSE_LL, pointer, kernel32.GetModuleHandleW(None), 0)
     if not hook_handle:
         raise ctypes.WinError()
+
+    threading.Thread(
+        target=serve_actions, args=("drag", ACTIONS), name="oriel-drag-ipc", daemon=True
+    ).start()
 
     try:
         msg = wintypes.MSG()
@@ -265,7 +285,3 @@ def main():
             user32.DispatchMessageW(ctypes.byref(msg))
     finally:
         user32.UnhookWindowsHookEx(hook_handle)
-
-
-if __name__ == "__main__":
-    main()
