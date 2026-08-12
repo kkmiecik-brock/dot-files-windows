@@ -6,8 +6,10 @@ NotifyWinEvent so GlazeWM's WinEventHook treats it as a genuine drag and can
 snap/re-tile it on release - the same technique AltSnap uses.
 
 Movement is driven by a polling loop (GetCursorPos + SetWindowPos on a tight
-sleep interval), mirroring the AHK implementation this replaces - not by
-reacting to WM_MOUSEMOVE hook callbacks, which proved less reliable.
+sleep interval), mirroring the AHK implementation this replaces. Both a
+direct WM_MOUSEMOVE hook reaction and an AltSnap-style worker-thread/message
+hybrid were tried and both reintroduced "fighting", so polling is the
+proven-working approach.
 """
 
 import ctypes
@@ -171,11 +173,10 @@ def _end_drag():
 
 
 def _drag_loop():
-    # Position is polled via GetCursorPos rather than reacting to WM_MOUSEMOVE
-    # hook callbacks (matches AHK's proven approach). Button-up is detected
-    # via the hook itself, not GetAsyncKeyState - since our hook suppresses
-    # the initiating button-down, Windows never updates the key-state table
-    # GetAsyncKeyState reads from, so polling it here always reports "up".
+    # Button-up is detected via the hook itself, not GetAsyncKeyState - since
+    # our hook suppresses the initiating button-down, Windows never updates
+    # the key-state table GetAsyncKeyState reads from, so polling it here
+    # always reports "up".
     while dragging:
         x, y = win32api.GetCursorPos()
         _update_drag(x, y)
