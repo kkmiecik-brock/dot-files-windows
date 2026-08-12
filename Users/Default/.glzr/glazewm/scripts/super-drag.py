@@ -94,6 +94,7 @@ drag_button = None
 hwnd = None
 start_x = start_y = 0
 win_x = win_y = win_w = win_h = 0
+resize_edges = frozenset()
 
 
 def _alt_down():
@@ -125,7 +126,7 @@ def _force_foreground(target_hwnd):
 
 
 def _begin_drag(button, x, y):
-    global dragging, drag_button, hwnd, start_x, start_y, win_x, win_y, win_w, win_h
+    global dragging, drag_button, hwnd, start_x, start_y, win_x, win_y, win_w, win_h, resize_edges
 
     target = win32gui.WindowFromPoint((x, y))
     if not target:
@@ -142,6 +143,23 @@ def _begin_drag(button, x, y):
     start_x, start_y = x, y
     win_x, win_y = left, top
     win_w, win_h = right - left, bottom - top
+
+    if button == "R":
+        # Mirrors niri's resize_edges_under: split the window into thirds
+        # and only move the edge(s) nearest the click - clicking dead
+        # center does nothing, same as niri.
+        frac_x = (x - left) / win_w if win_w else 0
+        frac_y = (y - top) / win_h if win_h else 0
+        edges = set()
+        if frac_x < 1 / 3:
+            edges.add("L")
+        elif frac_x > 2 / 3:
+            edges.add("R")
+        if frac_y < 1 / 3:
+            edges.add("T")
+        elif frac_y > 2 / 3:
+            edges.add("B")
+        resize_edges = edges
 
     try:
         _force_foreground(hwnd)
@@ -160,11 +178,24 @@ def _update_drag(x, y):
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         )
     else:
-        new_w = max(MIN_SIZE, win_w + dx)
-        new_h = max(MIN_SIZE, win_h + dy)
+        new_left, new_top = win_x, win_y
+        new_w, new_h = win_w, win_h
+
+        if "L" in resize_edges:
+            new_w = max(MIN_SIZE, win_w - dx)
+            new_left = win_x + win_w - new_w
+        elif "R" in resize_edges:
+            new_w = max(MIN_SIZE, win_w + dx)
+
+        if "T" in resize_edges:
+            new_h = max(MIN_SIZE, win_h - dy)
+            new_top = win_y + win_h - new_h
+        elif "B" in resize_edges:
+            new_h = max(MIN_SIZE, win_h + dy)
+
         win32gui.SetWindowPos(
-            hwnd, 0, 0, 0, new_w, new_h,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            hwnd, 0, new_left, new_top, new_w, new_h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
         )
 
 
