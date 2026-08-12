@@ -1,11 +1,15 @@
 <#
 .SYNOPSIS
-    Initializes a Windows environment with GlazeWM, YASB, and dotfile configs.
+    Initializes a Windows environment with PowerToys and dotfile configs.
 .DESCRIPTION
-    - Installs Scoop (if not present)
-    - Adds required Scoop buckets
-    - Installs GlazeWM and YASB via Scoop
-    - Copies dotfiles from this repo into the correct locations under $env:USERPROFILE
+    - Installs PowerToys via winget (replaces GlazeWM/YASB/Flow Launcher,
+      removed for corporate security policy)
+    - Removes leftover GlazeWM/YASB/Flow Launcher scoop installs and
+      autostart entries from previous setups
+    - Copies PowerToys module settings from this repo into
+      %LOCALAPPDATA%\Microsoft\PowerToys
+    - Registers PowerToys autostart via a Startup folder shortcut only
+      (no registry Run key, no Task Scheduler - see notes below)
 #>
 
 Set-StrictMode -Version Latest
@@ -14,64 +18,49 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DotfilesBase = Join-Path $RepoRoot "Users\Default"
 
-# -- 1. Scoop -----------------------------------------------------------------
+# -- 1. PowerToys --------------------------------------------------------------
 
-if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
-    Write-Host "Installing Scoop..." -ForegroundColor Cyan
-    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-    Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+$powerToysExe = "$env:LOCALAPPDATA\PowerToys\PowerToys.exe"
+
+if (Test-Path $powerToysExe) {
+    Write-Host "PowerToys already installed." -ForegroundColor Green
 } else {
-    Write-Host "Scoop already installed." -ForegroundColor Green
+    Write-Host "Installing PowerToys..." -ForegroundColor Cyan
+    winget install --id Microsoft.PowerToys -e --source winget --accept-package-agreements --accept-source-agreements
 }
 
-# -- 2. Buckets ---------------------------------------------------------------
+# -- 2. Remove legacy GlazeWM/YASB/Flow Launcher setup -------------------------
 
-Write-Host "Adding Scoop buckets..." -ForegroundColor Cyan
-scoop bucket add extras 2>$null
+Write-Host "`nRemoving legacy GlazeWM/YASB/Flow Launcher setup..." -ForegroundColor Cyan
 
-# -- 3. Apps ------------------------------------------------------------------
+Get-Process -Name "glazewm", "yasb", "pythonw", "Flow.Launcher" -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
 
-$apps = @("glazewm", "yasb", "flow-launcher")
-foreach ($app in $apps) {
-    if (scoop list $app 2>$null | Select-String $app) {
-        Write-Host "$app already installed." -ForegroundColor Green
-    } else {
-        Write-Host "Installing $app..." -ForegroundColor Cyan
-        scoop install $app
+$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$startupApprovedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+foreach ($name in @("GlazeWM", "FlowLauncher", "Flow.Launcher", "Teams")) {
+    Remove-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path $startupApprovedKey -Name $name -ErrorAction SilentlyContinue
+}
+foreach ($oldTask in @("GlazeWM", "GlazeWM Startup", "Flow Launcher Startup")) {
+    try {
+        Unregister-ScheduledTask -TaskName $oldTask -Confirm:$false -ErrorAction Stop
+        Write-Host "  Removed legacy task: $oldTask" -ForegroundColor Green
+    } catch { }
+}
+Remove-Item -Path (Join-Path ([Environment]::GetFolderPath("Startup")) "GlazeWM.lnk") -Force -ErrorAction SilentlyContinue
+
+foreach ($app in @("glazewm", "yasb", "flow-launcher", "zebar")) {
+    if (Get-Command scoop -ErrorAction SilentlyContinue) {
+        if (scoop list $app 2>$null | Select-String $app) {
+            Write-Host "  Uninstalling $app..." -ForegroundColor Cyan
+            scoop uninstall $app 2>$null
+        }
     }
 }
+Write-Host "  Legacy setup removed." -ForegroundColor Green
 
-# GlazeWM pulls in Zebar as a dependency - remove it
-if (scoop list zebar 2>$null | Select-String "zebar") {
-    Write-Host "Removing Zebar..." -ForegroundColor Cyan
-    scoop uninstall zebar
-} else {
-    Write-Host "Zebar not present, skipping." -ForegroundColor Green
-}
-
-# config.yaml references a bare "pythonw.exe" (relies on PATH) rather than a
-# hardcoded path, so any existing Python install works automatically. Only
-# install one via Scoop if nothing is already on PATH.
-$existingPython = Get-Command pythonw.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($existingPython) {
-    Write-Host "Using existing Python on PATH: $($existingPython.Source)" -ForegroundColor Green
-} else {
-    Write-Host "No Python found on PATH - installing via Scoop..." -ForegroundColor Cyan
-    scoop install python
-    $existingPython = Get-Command pythonw.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-}
-
-# super-drag.py and hide_taskbar.py both need pywin32 (win32api/win32gui/etc.)
-$pythonExe = Join-Path (Split-Path -Parent $existingPython.Source) "python.exe"
-& $pythonExe -c "import win32api" 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "pywin32 already installed." -ForegroundColor Green
-} else {
-    Write-Host "Installing pywin32..." -ForegroundColor Cyan
-    & $pythonExe -m pip install --quiet pywin32
-}
-
-# -- 4. Dotfiles --------------------------------------------------------------
+# -- 3. Settings ----------------------------------------------------------------
 
 function Copy-Dotfile {
     param (
@@ -94,55 +83,18 @@ function Copy-Dotfile {
     Write-Host "Copied: $RelativePath" -ForegroundColor Green
 }
 
-# Copies a file from the repo's scoop/apps/flow-launcher/current/<RelativePath>
-# into the real app-* versioned directory on disk.
-function Copy-FlowDotfile {
-    param (
-        [string]$RelativePath,
-        [string]$FlowAppDir
-    )
-    $src = Join-Path $DotfilesBase "scoop\apps\flow-launcher\current\$RelativePath"
-    $dst = Join-Path $FlowAppDir $RelativePath
-
-    if (-not (Test-Path $src)) {
-        Write-Warning "Source not found, skipping: $src"
-        return
-    }
-
-    $dstDir = Split-Path -Parent $dst
-    if (-not (Test-Path $dstDir)) {
-        New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
-    }
-
-    Copy-Item -Path $src -Destination $dst -Force
-    Write-Host "Copied: flow-launcher\$RelativePath -> $dst" -ForegroundColor Green
-}
-
-Write-Host "`nCopying dotfiles..." -ForegroundColor Cyan
-
-Copy-Dotfile ".glzr\glazewm\config.yaml"
-Copy-Dotfile ".glzr\glazewm\launch-teams-delayed.vbs"
-Copy-Dotfile ".glzr\glazewm\scripts\super-drag.py"
-Copy-Dotfile ".glzr\glazewm\scripts\hide_taskbar.py"
-Copy-Dotfile ".config\yasb\config.yaml"
-Copy-Dotfile ".config\yasb\styles.css"
-
-# Stop Flow Launcher before copying its files so it can't overwrite them on exit
-if (Get-Process -Name "Flow.Launcher" -ErrorAction SilentlyContinue) {
-    Write-Host "Stopping Flow Launcher before copying files..." -ForegroundColor Cyan
-    Stop-Process -Name "Flow.Launcher" -Force
+# Stop PowerToys before copying settings so it can't overwrite them on exit
+if (Get-Process -Name "PowerToys" -ErrorAction SilentlyContinue) {
+    Write-Host "Stopping PowerToys before copying settings..." -ForegroundColor Cyan
+    Get-Process -Name "PowerToys*" -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 2
 }
 
-$flowCurrentDir = "$env:USERPROFILE\scoop\apps\flow-launcher\current"
-$flowAppDir = Get-ChildItem -Path $flowCurrentDir -Directory -Filter "app-*" |
-              Sort-Object Name -Descending | Select-Object -First 1
-if (-not $flowAppDir) {
-    Write-Warning "Could not find Flow Launcher app-* dir under $flowCurrentDir. Skipping Flow Launcher files."
-} else {
-    Copy-FlowDotfile "UserData\Settings\Settings.json" $flowAppDir.FullName
-    Copy-FlowDotfile "UserData\Themes\Catppuccin Mocha.xaml" $flowAppDir.FullName
-}
+Write-Host "`nCopying PowerToys settings..." -ForegroundColor Cyan
+
+Copy-Dotfile "AppData\Local\Microsoft\PowerToys\settings.json"
+Copy-Dotfile "AppData\Local\Microsoft\PowerToys\FancyZones\settings.json"
+Copy-Dotfile "AppData\Local\Microsoft\PowerToys\PowerToys Run\settings.json"
 
 # Copies any custom Start Menu shortcuts (.lnk) tracked in the repo - generic,
 # so dropping a new shortcut into the repo folder is enough, no script changes.
@@ -154,59 +106,30 @@ if (Test-Path $startMenuSrcDir) {
     }
 }
 
-# -- 5. Startup entries --------------------------------------------------------
+# -- 4. Startup entry -------------------------------------------------------------
 
-Write-Host "`nConfiguring startup entries..." -ForegroundColor Cyan
+Write-Host "`nConfiguring startup entry..." -ForegroundColor Cyan
 
-$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$startupApprovedKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
-$serializeKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize"
-
-$glazeWmExe = "$env:USERPROFILE\scoop\apps\glazewm\current\glazewm.exe"
-
-# Remove Flow Launcher/Teams Run entries; GlazeWM launches them via startup_commands
-foreach ($name in @("FlowLauncher", "Flow.Launcher", "Teams")) {
-    Remove-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue
-    Remove-ItemProperty -Path $startupApprovedKey -Name $name -ErrorAction SilentlyContinue
-}
-Write-Host "  Cleaned up Run key entries for Flow Launcher and Teams." -ForegroundColor Green
-
-# Rancher Desktop is heavy (container/WSL2 backend) and not needed the instant
-# you log in - launch it manually via Flow Launcher when you need it.
-Remove-ItemProperty -Path $runKey -Name "RancherDesktop" -ErrorAction SilentlyContinue
-Remove-ItemProperty -Path $startupApprovedKey -Name "RancherDesktop" -ErrorAction SilentlyContinue
-Write-Host "  Disabled Rancher Desktop auto-start." -ForegroundColor Green
-
-# Remove legacy/task-scheduler-based GlazeWM tasks - this org's policy blocks
-# Task Scheduler-launched interactive apps (ERROR_ELEVATION_REQUIRED), so
-# GlazeWM starts via the Run key instead.
-foreach ($oldTask in @("GlazeWM", "GlazeWM Startup", "Flow Launcher Startup")) {
-    try {
-        Unregister-ScheduledTask -TaskName $oldTask -Confirm:$false -ErrorAction Stop
-        Write-Host "  Removed legacy task: $oldTask" -ForegroundColor Green
-    } catch { }
+# This org's policy blocks Task Scheduler-launched interactive apps
+# (ERROR_ELEVATION_REQUIRED) and we're avoiding registry Run key edits, so
+# PowerToys is autostarted the same way as Citrix Workspace/OneNote: a plain
+# Startup folder shortcut. Leave PowerToys' own "Start at login" setting off
+# (see settings.json "startup": false) so it doesn't try to register itself
+# via Task Scheduler.
+$startupShortcut = Join-Path ([Environment]::GetFolderPath("Startup")) "PowerToys.lnk"
+if (Test-Path $startupShortcut) {
+    Write-Host "  Startup shortcut already exists." -ForegroundColor Green
+} else {
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($startupShortcut)
+    $shortcut.TargetPath = $powerToysExe
+    $shortcut.WorkingDirectory = Split-Path $powerToysExe
+    $shortcut.Save()
+    Write-Host "  Created Startup shortcut -> $powerToysExe" -ForegroundColor Green
 }
 
-# The "Run these programs at user logon" policy list (Policies\Explorer\Run)
-# and the Startup folder shortcut were both tried and gave no meaningful
-# improvement over the regular Run key - the real bottleneck is system
-# resource contention during logon, not registry ordering. Use the plain
-# Run key for GlazeWM instead.
-Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run" -Name "1" -ErrorAction SilentlyContinue
-Remove-Item -Path (Join-Path ([Environment]::GetFolderPath("Startup")) "GlazeWM.lnk") -Force -ErrorAction SilentlyContinue
-
-if (-not (Test-Path $startupApprovedKey)) {
-    New-Item -Path $startupApprovedKey -Force | Out-Null
-}
-Remove-ItemProperty -Path $runKey -Name "GlazeWM" -ErrorAction SilentlyContinue
-Set-ItemProperty -Path $runKey -Name "GlazeWM" -Value "`"$glazeWmExe`""
-$enabledValue = [byte[]](0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
-Set-ItemProperty -Path $startupApprovedKey -Name "GlazeWM" -Value $enabledValue -Type Binary
-Write-Host "  GlazeWM registered in Run key -> $glazeWmExe" -ForegroundColor Green
-
-# Removes the ~10-30s delay Windows applies to Run key startup apps.
-if (-not (Test-Path $serializeKey)) { New-Item -Path $serializeKey -Force | Out-Null }
-Set-ItemProperty -Path $serializeKey -Name "StartupDelayInMSec" -Value 0 -Type DWord
-Write-Host "  Startup delay set to 0ms." -ForegroundColor Green
-
-Write-Host "`nDone! Log out and back in to start GlazeWM automatically." -ForegroundColor Cyan
+Write-Host "`nDone! Log out and back in to start PowerToys automatically." -ForegroundColor Cyan
+Write-Host "Note: FancyZones (tiling), Grab And Move (window drag), and PowerToys Run" -ForegroundColor Cyan
+Write-Host "(Alt+A launcher) are enabled. Keyboard Manager is enabled but its shortcut" -ForegroundColor Cyan
+Write-Host "remaps must be added manually via Settings > Keyboard Manager > Remap a" -ForegroundColor Cyan
+Write-Host "shortcut (Start App action) - see README for the exact bindings used." -ForegroundColor Cyan

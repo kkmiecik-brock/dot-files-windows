@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DOTFILES_SRC="$REPO_ROOT/Users/kkmiecik"
+DOTFILES_SRC="$REPO_ROOT/Users/Default"
 
 # ── Detect Windows username ───────────────────────────────────────────────────
 
@@ -48,39 +48,14 @@ copy_dotfile() {
     echo "  OK: $rel"
 }
 
-copy_flow_dotfile() {
-    local rel="$1"
-    local flow_app_dir="$2"
-    local src="$DOTFILES_SRC/scoop/apps/flow-launcher/current/$rel"
-    local dst="$flow_app_dir/$rel"
-
-    if [[ ! -f "$src" ]]; then
-        echo "  SKIP (not found): scoop/apps/flow-launcher/current/$rel"
-        return
-    fi
-
-    mkdir -p "$(dirname "$dst")"
-    cp -f "$src" "$dst"
-    echo "  OK: flow-launcher/$rel"
-}
-
 echo "Copying dotfiles..."
 
-copy_dotfile ".glzr/glazewm/config.yaml"
-copy_dotfile ".config/yasb/config.yaml"
-copy_dotfile ".config/yasb/styles.css"
-copy_dotfile ".config/yasb/hide_taskbar.py"
-
-flow_current_dir="$WIN_HOME/scoop/apps/flow-launcher/current"
-flow_app_dir="$(find "$flow_current_dir" -maxdepth 1 -mindepth 1 -type d -name 'app-*' | sort | tail -n1 || true)"
-
-if [[ -z "$flow_app_dir" ]]; then
-    echo "  SKIP Flow Launcher (app-* dir not found under $flow_current_dir)"
-else
-    copy_flow_dotfile "UserData/Settings/Settings.json" "$flow_app_dir"
-    copy_flow_dotfile "UserData/Themes/Catppuccin Mocha.xaml" "$flow_app_dir"
-fi
+# GlazeWM/YASB/Flow Launcher removed for corporate security policy - replaced
+# by PowerToys (FancyZones, Grab And Move, PowerToys Run, Keyboard Manager).
+copy_dotfile "AppData/Local/Microsoft/PowerToys/settings.json"
+copy_dotfile "AppData/Local/Microsoft/PowerToys/FancyZones/settings.json"
+copy_dotfile "AppData/Local/Microsoft/PowerToys/PowerToys Run/settings.json"
 
 echo ""
-echo "Done! Restart GlazeWM, YASB, and Flow Launcher to apply changes."
-echo "Note: To install apps (Scoop, GlazeWM, YASB, Flow Launcher), run initialize.ps1 from PowerShell on Windows."
+echo "Done! Restart PowerToys to apply changes."
+echo "Note: To install PowerToys and set up its Startup shortcut, run initialize.ps1 from PowerShell on Windows."
