@@ -55,8 +55,8 @@
   "FirstLaunch": false,
   "SettingWindowWidth": 999.75,
   "SettingWindowHeight": 699.75,
-  "SettingWindowTop": 198.75,
-  "SettingWindowLeft": 451.5,
+  "SettingWindowTop": -552.75,
+  "SettingWindowLeft": -1789.5,
   "SettingWindowState": 0,
   "ShowPlaceholder": true,
   "PlaceholderText": "",
@@ -146,8 +146,8 @@
   "AlwaysStartEn": false,
   "QuerySearchPrecision": "Regular",
   "AutoUpdates": false,
-  "WindowLeft": 607.875,
-  "WindowTop": 288.75,
+  "WindowLeft": -1642.125,
+  "WindowTop": -468.75,
   "PreviousScreenWidth": 0,
   "PreviousScreenHeight": 0,
   "PreviousDpiX": 0,
@@ -156,7 +156,7 @@
   "CustomWindowTop": 0,
   "KeepMaxResults": false,
   "MaxResultsToShow": 5,
-  "ActivateTimes": 334,
+  "ActivateTimes": 341,
   "CustomPluginHotkeys": [],
   "CustomShortcuts": [],
   "DontPromptUpdateMsg": false,
@@ -351,6 +351,18 @@
         "Version": "2.1.1",
         "ActionKeywords": [
           "s"
+        ],
+        "Priority": 0,
+        "SearchDelayTime": null,
+        "Disabled": false,
+        "HomeDisabled": false
+      },
+      "661D020D-4E0B-414B-B12B-58F795A20D79": {
+        "ID": "661D020D-4E0B-414B-B12B-58F795A20D79",
+        "Name": "Shortcuts",
+        "Version": "1.2.2",
+        "ActionKeywords": [
+          "q"
         ],
         "Priority": 0,
         "SearchDelayTime": null,
