@@ -1,1 +1,0 @@
-CreateObject("WScript.Shell").Run "powershell -NoProfile -Command ""Start-Sleep -Milliseconds 250; Start-Process 'C:\Users\kkmiecik\AppData\Local\Microsoft\WindowsApps\MSTeams_8wekyb3d8bbwe\ms-teams.exe'""", 0, False

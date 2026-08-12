@@ -12,7 +12,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$DotfilesBase = Join-Path $RepoRoot "Users\kkmiecik"
+$DotfilesBase = Join-Path $RepoRoot "Users\Default"
 
 # -- 1. Scoop -----------------------------------------------------------------
 
@@ -47,6 +47,28 @@ if (scoop list zebar 2>$null | Select-String "zebar") {
     scoop uninstall zebar
 } else {
     Write-Host "Zebar not present, skipping." -ForegroundColor Green
+}
+
+# config.yaml references a bare "pythonw.exe" (relies on PATH) rather than a
+# hardcoded path, so any existing Python install works automatically. Only
+# install one via Scoop if nothing is already on PATH.
+$existingPython = Get-Command pythonw.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($existingPython) {
+    Write-Host "Using existing Python on PATH: $($existingPython.Source)" -ForegroundColor Green
+} else {
+    Write-Host "No Python found on PATH - installing via Scoop..." -ForegroundColor Cyan
+    scoop install python
+    $existingPython = Get-Command pythonw.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+}
+
+# super-drag.py and hide_taskbar.py both need pywin32 (win32api/win32gui/etc.)
+$pythonExe = Join-Path (Split-Path -Parent $existingPython.Source) "python.exe"
+& $pythonExe -c "import win32api" 2>$null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "pywin32 already installed." -ForegroundColor Green
+} else {
+    Write-Host "Installing pywin32..." -ForegroundColor Cyan
+    & $pythonExe -m pip install --quiet pywin32
 }
 
 # -- 4. Dotfiles --------------------------------------------------------------
@@ -100,10 +122,10 @@ Write-Host "`nCopying dotfiles..." -ForegroundColor Cyan
 
 Copy-Dotfile ".glzr\glazewm\config.yaml"
 Copy-Dotfile ".glzr\glazewm\launch-teams-delayed.vbs"
-Copy-Dotfile ".glzr\glazewm\super-drag.py"
+Copy-Dotfile ".glzr\glazewm\scripts\super-drag.py"
+Copy-Dotfile ".glzr\glazewm\scripts\hide_taskbar.py"
 Copy-Dotfile ".config\yasb\config.yaml"
 Copy-Dotfile ".config\yasb\styles.css"
-Copy-Dotfile ".config\yasb\hide_taskbar.py"
 
 # Stop Flow Launcher before copying its files so it can't overwrite them on exit
 if (Get-Process -Name "Flow.Launcher" -ErrorAction SilentlyContinue) {
@@ -120,6 +142,16 @@ if (-not $flowAppDir) {
 } else {
     Copy-FlowDotfile "UserData\Settings\Settings.json" $flowAppDir.FullName
     Copy-FlowDotfile "UserData\Themes\Catppuccin Mocha.xaml" $flowAppDir.FullName
+}
+
+# Copies any custom Start Menu shortcuts (.lnk) tracked in the repo - generic,
+# so dropping a new shortcut into the repo folder is enough, no script changes.
+$startMenuRelPath = "AppData\Roaming\Microsoft\Windows\Start Menu\Programs"
+$startMenuSrcDir = Join-Path $DotfilesBase $startMenuRelPath
+if (Test-Path $startMenuSrcDir) {
+    Get-ChildItem -Path $startMenuSrcDir -Filter "*.lnk" | ForEach-Object {
+        Copy-Dotfile (Join-Path $startMenuRelPath $_.Name)
+    }
 }
 
 # -- 5. Startup entries --------------------------------------------------------

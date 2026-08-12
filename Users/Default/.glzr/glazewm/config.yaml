@@ -21,17 +21,25 @@ general:
   # script or launching another application.
   # Example: The below command launches yasb.
   startup_commands:
-    - 'shell-exec C:\Users\kkmiecik\scoop\apps\flow-launcher\current\Flow.Launcher.exe'
-    - 'shell-exec C:\PROGRA~2\MICROS~1\Edge\APPLIC~1\msedge.exe --app=https://teams.cloud.microsoft/ -inprivate'
-    - 'shell-exec wscript C:\Users\kkmiecik\.glzr\glazewm\launch-teams-delayed.vbs'
-    - 'shell-exec C:\Users\kkmiecik\AppData\Local\Programs\Python\Python313\pythonw.exe C:\Users\kkmiecik\.glzr\glazewm\super-drag.py'
-    - 'shell-exec C:\Users\kkmiecik\AppData\Local\Programs\Python\Python313\pythonw.exe C:\Users\kkmiecik\.config\yasb\hide_taskbar.py'
+    # App launchers
+    - 'shell-exec %USERPROFILE%\scoop\apps\flow-launcher\current\Flow.Launcher.exe'
     - 'shell-exec yasb'
+
+    # Microsoft Teams
+    - 'shell-exec C:\PROGRA~2\MICROS~1\Edge\APPLIC~1\msedge.exe --app=https://teams.cloud.microsoft/ -inprivate'
+    - 'shell-exec wscript %USERPROFILE%\.glzr\glazewm\launch-teams-delayed.vbs'
+
+    # Python helper scripts
+    - 'shell-exec pythonw.exe %USERPROFILE%\.glzr\glazewm\scripts\super-drag.py'
+    - 'shell-exec pythonw.exe %USERPROFILE%\.glzr\glazewm\scripts\hide_taskbar.py'
 
   # Commands to run just before the WM is shutdown.
   # Example: The below command kills Zebar.
   shutdown_commands:
+    # App launchers
     - 'shell-exec taskkill /IM yasb.exe /F'
+
+    # Python helper scripts
     - 'shell-exec powershell -NoProfile -WindowStyle Hidden -Command "$procs = Get-CimInstance Win32_Process | Where-Object { ($_.Name -match ''^python(\.exe)?$'' -or $_.Name -eq ''pythonw.exe'') -and $_.CommandLine -match ''hide_taskbar\.py'' }; if ($procs) { $procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }"'
     - 'shell-exec powershell -NoProfile -WindowStyle Hidden -Command "$procs = Get-CimInstance Win32_Process | Where-Object { ($_.Name -match ''^python(\.exe)?$'' -or $_.Name -eq ''pythonw.exe'') -and $_.CommandLine -match ''super-drag\.py'' }; if ($procs) { $procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }"'
 

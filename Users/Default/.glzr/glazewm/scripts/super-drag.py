@@ -13,6 +13,8 @@ proven-working approach.
 """
 
 import ctypes
+import os
+import subprocess
 import threading
 import time
 from ctypes import wintypes
@@ -197,8 +199,28 @@ def _mouse_proc(nCode, wParam, lParam):
     return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
 
+def _kill_other_instances():
+    # If a newer instance is launched while an older one is still running,
+    # the newer one wins - kill any other process running this same script.
+    script = os.path.abspath(__file__)
+    ps_script = (
+        "$procs = Get-CimInstance Win32_Process | Where-Object { "
+        "($_.Name -match '^python(\\.exe)?$' -or $_.Name -eq 'pythonw.exe') "
+        f"-and $_.CommandLine -match [regex]::Escape('{script}') "
+        f"-and $_.ProcessId -ne {os.getpid()} }}; "
+        "if ($procs) { $procs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }"
+    )
+    subprocess.run(
+        ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        check=False,
+    )
+
+
 def main():
     global hook_handle
+
+    _kill_other_instances()
 
     pointer = HOOKPROC(_mouse_proc)
     hook_handle = user32.SetWindowsHookExW(WH_MOUSE_LL, pointer, kernel32.GetModuleHandleW(None), 0)
