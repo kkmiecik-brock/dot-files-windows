@@ -30,6 +30,21 @@
   "tiling": {
     "inner_gap": 10,
     "outer_gap": { "top": 10, "right": 10, "bottom": 10, "left": 10 },
-    "cleanup_interval": 5.0
+    "ignore_rules": [
+      { "class": ["Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW", "Windows.UI.Core.CoreWindow", "ForegroundStaging", "MultitaskingViewFrame", "TaskListThumbnailWnd", "SysShadow", "tooltips_class32", "#32768", "XamlExplorerHostIslandWindow", "SnagIt9Editor"] },
+      { "process": ["explorer.exe", "flow.launcher.exe", "taskmgr.exe", "windows365.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "textinputhost.exe", "systemsettings.exe", "logioverlay.exe", "logioptions.exe", "powertoys.quickaccess.exe", "microsoft.cmdpal.ui.exe", "selfservice.exe"] },
+      { "title": "calculator" },
+      { "process": "ms-teams.exe", "title_contains": "microsoft teams notification" },
+      { "process": "code.exe", "class": "Chrome_WidgetWin_0" },
+      { "process": ["msrdc.exe", "windows365.exe"], "class_contains": "credential" },
+      { "process": ["msrdc.exe", "windows365.exe"], "class": "#32770" },
+      { "process": ["firefox.exe", "msedge.exe", "chrome.exe"], "class": "#32770" },
+      { "process": ["firefox.exe", "msedge.exe", "chrome.exe"], "title_contains": ["save as", "open", "download"] },
+      { "process": "firefox.exe", "title": "Picture-in-Picture" },
+      { "process": "excel.exe", "class_not": "XLMAIN" },
+      { "process": "winword.exe", "class_not": "OpusApp" },
+      { "process": "powerpnt.exe", "class_not": "PPTFrameClass" },
+      { "class": "ApplicationFrameWindow", "title": "Settings" }
+    ]
   }
 }

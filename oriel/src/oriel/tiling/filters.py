@@ -12,6 +12,10 @@ Primary structural filter mirrors the Windows alt-tab / GlazeWM algorithm:
 The IGNORE_* lists are a secondary safety net for apps that happen to pass all
 structural checks but still shouldn't be tiled (e.g. WPF splash screens that
 set a full title and minimize/maximize buttons before the real window appears).
+These exclusions are data, not code: they live in config.json's
+tiling.ignore_rules, loaded via load_ignore_rules() - no per-application
+conditionals belong in this module. Add a new exclusion by adding a rule to
+config.json and reloading, not by editing this file.
 """
 import ctypes
 import ctypes.wintypes
@@ -21,6 +25,8 @@ import win32api
 import win32con
 import win32gui
 import win32process
+
+from oriel.config import get_section
 
 _user32 = ctypes.windll.user32
 _user32.GetAncestor.restype = ctypes.wintypes.HWND
@@ -33,28 +39,66 @@ def _get_root_owner(hwnd):
     return _user32.GetAncestor(hwnd, _GA_ROOTOWNER)
 
 
-def _is_cloaked(hwnd):
+def is_cloaked(hwnd):
     result = ctypes.c_int(0)
     ctypes.windll.dwmapi.DwmGetWindowAttribute(
         hwnd, _DWMWA_CLOAKED, ctypes.byref(result), ctypes.sizeof(result)
     )
     return result.value != 0
 
-IGNORE_CLASSES = {
-    "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW",
-    "Windows.UI.Core.CoreWindow", "ForegroundStaging", "MultitaskingViewFrame",
-    "TaskListThumbnailWnd", "SysShadow", "tooltips_class32", "#32768",
-    "XamlExplorerHostIslandWindow", "SnagIt9Editor",
-}
-IGNORE_PROCESSES = {
-    "explorer.exe", "flow.launcher.exe", "taskmgr.exe", "windows365.exe",
-    "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe",
-    "textinputhost.exe", "systemsettings.exe",
-    "logioverlay.exe", "logioptions.exe",
-    "powertoys.quickaccess.exe", "microsoft.cmdpal.ui.exe",
-    "selfservice.exe",
-}
-IGNORE_TITLES = {"calculator"}
+
+# Loaded from config.json's tiling.ignore_rules - see load_ignore_rules().
+# Each rule is a dict of field -> value/[values]; every field present in a
+# rule must match for that rule to apply (AND), and a window is excluded if
+# ANY rule matches (OR across the list). Supported fields:
+#   process         - exact process name match (case-insensitive)
+#   class            - exact class name match (case-insensitive)
+#   class_contains   - substring match against class name (case-insensitive)
+#   class_not        - excluded only if class does NOT match (case-insensitive)
+#   title            - exact title match (case-insensitive)
+#   title_contains   - substring match against title (case-insensitive)
+# Any field's value may be a single string or a list (list = "matches any of").
+_ignore_rules = []
+
+
+def load_ignore_rules():
+    global _ignore_rules
+    _ignore_rules = get_section("tiling").get("ignore_rules", [])
+
+
+def _as_list(value):
+    return value if isinstance(value, list) else [value]
+
+
+def _equals_any(value, spec):
+    value = value.lower()
+    return any(value == candidate.lower() for candidate in _as_list(spec))
+
+
+def _contains_any(value, spec):
+    value = value.lower()
+    return any(candidate.lower() in value for candidate in _as_list(spec))
+
+
+def _rule_matches(rule, process_name, class_name, title):
+    if "process" in rule and not _equals_any(process_name, rule["process"]):
+        return False
+    if "class" in rule and not _equals_any(class_name, rule["class"]):
+        return False
+    if "class_contains" in rule and not _contains_any(class_name, rule["class_contains"]):
+        return False
+    if "class_not" in rule and _equals_any(class_name, rule["class_not"]):
+        return False
+    if "title" in rule and not _equals_any(title, rule["title"]):
+        return False
+    if "title_contains" in rule and not _contains_any(title, rule["title_contains"]):
+        return False
+    return True
+
+
+def _is_ignored(process_name, class_name, title):
+    return any(_rule_matches(rule, process_name, class_name, title) for rule in _ignore_rules)
+
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
@@ -87,37 +131,10 @@ def _get_process_name(hwnd):
         win32api.CloseHandle(handle)
 
 
-def _extra_ignore_rules(process_name, class_name, title):
-    # Ported from this machine's prior GlazeWM window_rules ignore list.
-    if process_name == "ms-teams.exe" and "microsoft teams notification" in title.lower():
-        return True
-    if process_name == "code.exe" and class_name == "Chrome_WidgetWin_0":
-        return True
-    if process_name in ("msrdc.exe", "windows365.exe") and (
-        "credential" in class_name.lower() or class_name == "#32770"
-    ):
-        return True
-    if process_name in ("firefox.exe", "msedge.exe", "chrome.exe") and (
-        class_name == "#32770"
-        or any(word in title.lower() for word in ("save as", "open", "download"))
-    ):
-        return True
-    if process_name in ("excel.exe", "winword.exe", "powerpnt.exe"):
-        main_class = {"excel.exe": "XLMAIN", "winword.exe": "OpusApp", "powerpnt.exe": "PPTFrameClass"}
-        if class_name != main_class[process_name]:
-            return True
-    # UWP apps (Settings, Mail, etc.) are hosted inside the shared
-    # ApplicationFrameHost.exe process, so process-name checks can't target
-    # them individually - match on class + title instead.
-    if class_name == "ApplicationFrameWindow" and title == "Settings":
-        return True
-    return False
-
-
 def is_manageable(hwnd):
     if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
         return False
-    if _is_cloaked(hwnd):
+    if is_cloaked(hwnd):
         return False
 
     ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
@@ -139,17 +156,10 @@ def is_manageable(hwnd):
     title = _get_window_text(hwnd)
     if not title:
         return False
-    if title.lower() in IGNORE_TITLES:
-        return False
 
     class_name = _get_class_name(hwnd)
-    if class_name in IGNORE_CLASSES:
-        return False
-
     process_name = _get_process_name(hwnd)
-    if process_name in IGNORE_PROCESSES:
-        return False
-    if _extra_ignore_rules(process_name, class_name, title):
+    if _is_ignored(process_name, class_name, title):
         return False
 
     return True

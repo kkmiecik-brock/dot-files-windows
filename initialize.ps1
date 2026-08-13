@@ -66,7 +66,11 @@ Write-Host "`nCopying oriel..." -ForegroundColor Cyan
 $orielSrc = Join-Path $RepoRoot "oriel"
 $orielDst = Join-Path $env:USERPROFILE ".config\oriel"
 New-Item -ItemType Directory -Path $orielDst -Force | Out-Null
-Copy-Item -Path (Join-Path $orielSrc "*") -Destination $orielDst -Recurse -Force
+# docs/ is repo-only documentation (research notes, task lists) - deliberately
+# not deployed, so copy exactly what's needed to run instead of a blanket "*".
+foreach ($item in "src", "tests", "main.py", "pyproject.toml", "config.json") {
+    Copy-Item -Path (Join-Path $orielSrc $item) -Destination $orielDst -Recurse -Force
+}
 Write-Host "  Copied to $orielDst" -ForegroundColor Green
 
 # -- 5. PowerToys settings -----------------------------------------------------
