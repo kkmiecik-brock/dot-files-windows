@@ -584,6 +584,71 @@ when task 4 is implemented.
 
 ---
 
+## 15. [ ] `SetWindowPos` itself is mysteriously slow (~30-300ms/call) when called from the running daemon
+
+**Module:** `src/oriel/tiling/state.py` (`reflow`)
+
+**Priority: MEDIUM (real but not as acutely noticeable as task 14; root cause still unknown)**
+
+**Problem:** Separately from task 14's `EnumWindows` bug, direct timing
+showed individual `win32gui.SetWindowPos` calls inside `reflow()` taking
+30-300ms each (occasionally over 1s), for *every* window in the tree -
+including windows that were never newly opened. A single window-open or
+hotkey-resize action can trigger several `reflow()` passes (task 13's
+bounded min-size-learn retries), each repositioning every leaf, so the
+wall-clock cost compounds quickly (measured up to ~1-4s total for a single
+triggering event with 5-8 windows tiled).
+
+**Investigated extensively (2026-08-17), ruled out:**
+- WinEventHook registration itself, with or without `WINEVENT_SKIPOWNPROCESS`
+  (isolated repro script: <0.3ms regardless)
+- IPC thread / manageable-retry `threading.Timer` threads (a minimal daemon
+  with only the message loop, no IPC, no timers, was equally slow)
+- No-op vs. genuine position change (isolated repositioning to real
+  different coordinates stayed fast, <2ms)
+- New-window-creation/DWM-animation congestion (resizing already-settled
+  windows, no window creation happening, was still slow)
+- Background process scheduling priority (`HIGH_PRIORITY_CLASS` made it
+  *worse*, not better)
+
+None of these isolated repro attempts reproduced the slowness outside the
+real, fully-running daemon context - only the actual `oriel.tiling`
+process, doing its actual `reflow()` work, shows it. The exact OS-level
+mechanism remains unidentified.
+
+**REJECTED fix attempt (see repo memory for full write-up):** tried (a)
+skipping `SetWindowPos` per-leaf when `GetWindowRect` already matches the
+computed target, (b) letting that naturally scope min-size retries to only
+affected leaves, (c) batching via `Begin/Defer/EndDeferWindowPos` instead
+of N independent `SetWindowPos` calls. A/B tested rigorously with a
+controlled, deterministic synthetic window set (plain `CreateWindow`
+windows, not real apps - real `notepad.exe` launches on this machine
+create a variable, growing number of phantom windows per launch, which
+had been silently contaminating earlier comparisons). Result: consistently
+**worse** than the original code (avg 712ms vs 516ms, max 1251ms vs 870ms,
+identical workload). Reverted completely. Root cause of why it regressed:
+the "skip if unchanged" check only pays off when some leaves are genuinely
+unaffected by a reflow, but in the common cases that matter (a hotkey
+resize, inserting a window into an N-way split) *every* leaf's absolute
+rect changes when ratios/leaf-count change - so the skip never actually
+triggers, while its `GetWindowRect` check still runs for every leaf, every
+time, adding pure overhead with zero benefit. Whether `DeferWindowPos`
+batching alone (without the skip-check) would help was never isolated/
+proven either way.
+
+**Plan for next attempt:**
+- Get a real root cause first via OS-level tracing (ETW / Process Monitor
+  around a slow `SetWindowPos` call from the live daemon) rather than more
+  Python-level black-box elimination testing - 6 plausible hypotheses were
+  already ruled out this way without finding the actual mechanism.
+- If revisited, test `DeferWindowPos` batching in complete isolation from
+  any "skip unchanged" logic, using the synthetic-window test harness
+  approach (deterministic `CreateWindow`-based windows) for any before/after
+  comparison - never trust a real installed app's window-creation behavior
+  to be repeatable/controlled for this kind of measurement again.
+
+---
+
 ## Not in scope for tiling, noted for later
 
 - `src/oriel/drag/daemon.py`'s `WH_MOUSE_LL` low-level mouse hook is exactly
