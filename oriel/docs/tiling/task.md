@@ -541,6 +541,49 @@ instead.
 
 ---
 
+## 14. [x] Fix: enforce_tiled_placement got ~100x slower after task 12
+
+**Module:** `src/oriel/tiling/geometry.py`
+
+**Priority: HIGH (real, measured user-facing slowdown)**
+
+**Status:** Fixed and verified (2026-08-17). User reported the daemon
+"feels slower" since the recent tasks. Profiled live with `cProfile`
+around `enforce_tiled_placement` during a burst of real Alt+Tab activity:
+~98% of its time was spent inside `geometry.visible_taskbar_rect()`'s
+`win32gui.EnumWindows` scan, which calls `GetClassName` on every one of
+this machine's ~500 top-level desktop windows, on *every single call* -
+`compute_rects` averaged ~9.2ms and `enforce_tiled_placement` ~4.6ms under
+load. This function was always this expensive, but task 12 (unconditional
+placement enforcement, no more 2s settle-window bound) made it run on
+every `LOCATIONCHANGE`/`FOREGROUND` for a tiled window's *entire*
+lifetime instead of briefly after it opens - multiplying how often this
+one expensive call happens by a large factor, which is what actually made
+the slowdown noticeable/reported.
+
+**Fix:** Cache the taskbar's hwnd per monitor (`_taskbar_hwnd_cache`),
+mirroring the existing `_frame_margin_cache` pattern in the same file.
+The taskbar's hwnd is stable for the life of the `explorer.exe` process,
+so only the very first call (or one after `explorer.exe` restarts,
+detected via `win32gui.IsWindow`) needs the full `EnumWindows` scan -
+every later call is just two cheap calls (`IsWindowVisible` +
+`GetWindowRect`) on the already-known hwnd. Also separated "find the
+taskbar's hwnd" from "is it currently visible" (the old code's scan
+filtered by `IsWindowVisible` *during* the scan, which meant a
+currently-hidden taskbar - oriel's default state - could never even be
+discovered/cached in the first place).
+
+**Verified live, before/after, same Alt+Tab load:** `compute_rects`
+dropped from ~9.2ms to ~0.078ms average (~118x), `enforce_tiled_placement`
+from ~4.6ms to ~0.07ms average (~65x). Full test suite still passes.
+
+**Note:** if a monitor is ever connected/disconnected (task 4, not yet
+implemented), this cache should be invalidated too - not a problem today
+since nothing detects monitor reconfiguration yet, but worth remembering
+when task 4 is implemented.
+
+---
+
 ## Not in scope for tiling, noted for later
 
 - `src/oriel/drag/daemon.py`'s `WH_MOUSE_LL` low-level mouse hook is exactly

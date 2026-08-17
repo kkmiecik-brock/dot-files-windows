@@ -60,12 +60,12 @@ def monitor_at_point(point):
     return int(win32api.MonitorFromPoint(point, win32con.MONITOR_DEFAULTTONEAREST))
 
 
-def visible_taskbar_rect(monitor):
-    # GetMonitorInfo's "Work" rect only reflects a taskbar that's docked AND
-    # currently visible in the OS's own eyes - it doesn't get renegotiated
-    # just because oriel.taskbar's ShowWindow(SW_HIDE) hid the window, so
-    # relying on it directly leaves a stale gap where a hidden taskbar used
-    # to be. Find the real, currently-visible taskbar rect ourselves instead.
+# monitor -> taskbar hwnd, populated by _find_taskbar_hwnd on first use. See
+# visible_taskbar_rect for why this is cached.
+_taskbar_hwnd_cache = {}
+
+
+def _find_taskbar_hwnd(monitor):
     found = []
 
     def callback(hwnd, _):
@@ -73,15 +73,44 @@ def visible_taskbar_rect(monitor):
             class_name = win32gui.GetClassName(hwnd)
         except win32gui.error:
             return True
-        if class_name in TASKBAR_CLASSES and win32gui.IsWindowVisible(hwnd):
+        if class_name in TASKBAR_CLASSES:
             found.append(hwnd)
         return True
 
     win32gui.EnumWindows(callback, None)
     for hwnd in found:
         if int(win32api.MonitorFromWindow(hwnd, win32con.MONITOR_DEFAULTTONEAREST)) == monitor:
-            return win32gui.GetWindowRect(hwnd)
+            return hwnd
     return None
+
+
+def visible_taskbar_rect(monitor):
+    # GetMonitorInfo's "Work" rect only reflects a taskbar that's docked AND
+    # currently visible in the OS's own eyes - it doesn't get renegotiated
+    # just because oriel.taskbar's ShowWindow(SW_HIDE) hid the window, so
+    # relying on it directly leaves a stale gap where a hidden taskbar used
+    # to be. Find the real, currently-visible taskbar rect ourselves instead.
+    #
+    # The taskbar's hwnd is cached per monitor (task 12 made the caller of
+    # this, enforce_tiled_placement, run unconditionally instead of only
+    # briefly after a window opens - profiled live and found this function's
+    # full EnumWindows scan, calling GetClassName on every one of a
+    # (typically 100s of) top-level windows on the desktop, was ~98% of its
+    # cost). The taskbar's hwnd is stable for the life of the explorer.exe
+    # process, so only the first call (or one after explorer.exe restarts)
+    # needs the full scan - every later call is just two cheap win32 calls
+    # on the already-known hwnd. NOTE: if a monitor is ever connected or
+    # disconnected (task 4, not yet implemented), this cache should be
+    # invalidated too - not needed yet since nothing detects that today.
+    hwnd = _taskbar_hwnd_cache.get(monitor)
+    if hwnd is None or not win32gui.IsWindow(hwnd):
+        hwnd = _find_taskbar_hwnd(monitor)
+        if hwnd is None:
+            return None
+        _taskbar_hwnd_cache[monitor] = hwnd
+    if not win32gui.IsWindowVisible(hwnd):
+        return None
+    return win32gui.GetWindowRect(hwnd)
 
 
 def subtract_taskbar(bounds, taskbar_rect):
