@@ -46,14 +46,6 @@ RECENTLY_FINALIZED_WINDOW = 2.0
 MAX_MANAGEABLE_RETRIES = 5
 RETRY_INTERVAL = 0.15
 
-# How long after a window is first tiled we keep watching for it to
-# reposition itself onto a different monitor (e.g. an app restoring its own
-# remembered window position asynchronously after being shown) - see
-# _reassert_monitor_if_settling. SetWindowPos/MoveWindow always generates
-# EVENT_OBJECT_LOCATIONCHANGE, so this is purely a bound on how long oriel
-# keeps fighting for cursor-driven placement, not a retry backstop.
-MONITOR_SETTLE_WINDOW = 2.0
-
 _state = None
 _recently_finalized = {}
 
@@ -66,9 +58,10 @@ _pending_manageable_hwnds = set()
 _manageable_retry_counts = {}
 _manageable_retry_scheduled = set()
 
-# hwnd -> monotonic expiry. Populated when a window is first tiled by
-# on_window_shown; see _reassert_monitor_if_settling.
-_settling_hwnds = {}
+# hwnds currently inside a bracketed EVENT_SYSTEM_MOVESIZESTART/END gesture
+# (native OS drag or drag.py's custom alt+drag - both emit this bracket) -
+# see enforce_tiled_placement, which must never fight a real gesture.
+_active_gestures = set()
 
 # --- Posted-event queue (IPC thread -> message-loop thread) ------------------
 
@@ -127,6 +120,14 @@ def reload_settings(_data=None):
     _state.reflow_all()
 
 
+def reflow_all(_data=None):
+    """Recomputes every monitor's layout without touching settings - for
+    triggers that change available work area without changing config, e.g.
+    oriel.taskbar's "reflow" notification whenever it hides/shows the
+    taskbar."""
+    _state.reflow_all()
+
+
 # --- Window lifecycle ---------------------------------------------------------
 
 def bootstrap_existing_windows():
@@ -162,7 +163,6 @@ def on_window_shown(hwnd):
     monitor = geometry.monitor_at_cursor()
     _state.insert_hwnd(monitor, hwnd)
     _state.reflow(monitor)
-    _settling_hwnds[hwnd] = time.monotonic() + MONITOR_SETTLE_WINDOW
 
 
 def _maybe_retry_window_shown(hwnd):
@@ -193,32 +193,51 @@ def recheck_if_pending(hwnd):
         on_window_shown(hwnd)
 
 
-def _reassert_monitor_if_settling(hwnd):
-    """Some apps restore their own remembered window position/monitor
-    asynchronously, shortly after being shown - silently overriding oriel's
-    cursor-driven placement without ever going through a real move/resize
-    gesture. This only reasserts placement for windows still within their
-    settle window right after being tiled, so it never fights a deliberate
-    move the user makes later."""
-    expiry = _settling_hwnds.get(hwnd)
-    if expiry is None:
-        return
-    if time.monotonic() > expiry:
-        _settling_hwnds.pop(hwnd, None)
+def enforce_tiled_placement(hwnd):
+    """oriel owns geometry for every tiled window at all times - apps don't
+    get to manage their own bounds. If a tiled window's real monitor or rect
+    ever drifts from what its tree leaf expects (an app restoring its own
+    remembered position/size, or any other non-drag repositioning), snap it
+    straight back. The only exception is an active move/resize gesture
+    (tracked in _active_gestures), so a deliberate user drag is never
+    fought. Runs on every EVENT_OBJECT_LOCATIONCHANGE/EVENT_SYSTEM_FOREGROUND,
+    but is a cheap no-op for any hwnd oriel isn't tiling."""
+    if hwnd in _active_gestures:
         return
     monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None:
-        _settling_hwnds.pop(hwnd, None)
         return
-    if geometry.monitor_of(hwnd) == monitor:
+    if _state.fullscreen_leaf(monitor, workspace) is leaf:
         return
+    if geometry.monitor_of(hwnd) != monitor:
+        _state.reflow(monitor, workspace)
+        return
+    expected = _state.compute_rects(monitor, workspace).get(leaf)
+    if expected is None:
+        return
+    expected = geometry.expand_rect_for_frame(expected, hwnd)
+    try:
+        actual = win32gui.GetWindowRect(hwnd)
+    except win32gui.error:
+        return
+    if actual == expected:
+        return
+    actual_w, actual_h = actual[2] - actual[0], actual[3] - actual[1]
+    expected_w, expected_h = expected[2] - expected[0], expected[3] - expected[1]
+    if actual_w > expected_w or actual_h > expected_h:
+        # Clamped bigger than requested - an enforced minimum size. If this
+        # doesn't teach us anything new, reflowing again would only ask for
+        # the exact same impossible size and get clamped the exact same
+        # way - stop here instead of fighting forever (task 13).
+        if not geometry.learn_min_size(hwnd, actual_w, actual_h):
+            return
     _state.reflow(monitor, workspace)
 
 
 def on_window_destroyed(hwnd):
     _pending_manageable_hwnds.discard(hwnd)
     _manageable_retry_counts.pop(hwnd, None)
-    _settling_hwnds.pop(hwnd, None)
+    _active_gestures.discard(hwnd)
     monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None:
         return
@@ -238,7 +257,6 @@ def on_window_hidden(hwnd):
     # only actually unmanage once native state confirms it's still hidden.
     if win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd) and not is_cloaked(hwnd):
         return
-    _settling_hwnds.pop(hwnd, None)
     monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None:
         return
@@ -366,10 +384,15 @@ def on_move_resize_end(hwnd):
     hwnd was just finalized via IPC, since that path is authoritative and
     (before single-threading this) racing it against this WinEvent made
     behavior nondeterministic."""
+    _active_gestures.discard(hwnd)
     finalized_at = _recently_finalized.pop(hwnd, None)
     if finalized_at is not None and time.monotonic() - finalized_at < RECENTLY_FINALIZED_WINDOW:
         return
     finalize_move_resize(hwnd, None)
+
+
+def on_move_resize_start(hwnd):
+    _active_gestures.add(hwnd)
 
 
 def record_drag_kind(data):
@@ -384,6 +407,7 @@ def record_drag_kind(data):
     if not hwnd or kind not in ("move", "resize"):
         return
     hwnd = int(hwnd)
+    _active_gestures.discard(hwnd)
     finalize_move_resize(hwnd, kind)
     _recently_finalized[hwnd] = time.monotonic()
 
@@ -395,6 +419,7 @@ EVENT_OBJECT_SHOW = 0x8002
 EVENT_OBJECT_NAMECHANGE = 0x800C
 EVENT_OBJECT_LOCATIONCHANGE = 0x800B
 EVENT_SYSTEM_FOREGROUND = 0x0003
+EVENT_SYSTEM_MOVESIZESTART = 0x000A
 EVENT_SYSTEM_MOVESIZEEND = 0x000B
 EVENT_OBJECT_HIDE = 0x8003
 EVENT_OBJECT_CLOAKED = 0x8017
@@ -408,9 +433,6 @@ WINEVENT_OUTOFCONTEXT = 0x0000
 # don't currently need but may want later:
 #   EVENT_SYSTEM_MINIMIZESTART (0x0016) - window minimized
 #   EVENT_SYSTEM_MINIMIZEEND (0x0017)   - window restored from minimized
-#   EVENT_SYSTEM_MOVESIZESTART (0x000A) - we only hook the END counterpart
-#                                          today (see drag/daemon.py for why
-#                                          the START side matters there)
 
 user32 = ctypes.windll.user32
 
@@ -437,9 +459,11 @@ def _win_event_proc(hWinEventHook, event, hwnd, idObject, idChild, idEventThread
         on_window_hidden(hwnd)
     elif event == EVENT_SYSTEM_MOVESIZEEND:
         on_move_resize_end(hwnd)
+    elif event == EVENT_SYSTEM_MOVESIZESTART:
+        on_move_resize_start(hwnd)
     elif event in (EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND):
         recheck_if_pending(hwnd)
-        _reassert_monitor_if_settling(hwnd)
+        enforce_tiled_placement(hwnd)
 
 
 def run_message_loop():
@@ -462,6 +486,9 @@ def run_message_loop():
     )
     hook_movesize = user32.SetWinEventHook(
         EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZEEND, None, win_event_proc, 0, 0, WINEVENT_OUTOFCONTEXT
+    )
+    hook_movesize_start = user32.SetWinEventHook(
+        EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZESTART, None, win_event_proc, 0, 0, WINEVENT_OUTOFCONTEXT
     )
     hook_locationchange = user32.SetWinEventHook(
         EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, None, win_event_proc, 0, 0, WINEVENT_OUTOFCONTEXT
@@ -496,6 +523,8 @@ def run_message_loop():
             user32.UnhookWinEvent(hook_namechange)
         if hook_movesize:
             user32.UnhookWinEvent(hook_movesize)
+        if hook_movesize_start:
+            user32.UnhookWinEvent(hook_movesize_start)
         if hook_locationchange:
             user32.UnhookWinEvent(hook_locationchange)
         if hook_foreground:

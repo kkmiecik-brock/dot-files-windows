@@ -27,6 +27,7 @@ MOD_MAP = {
 }
 MOD_NOREPEAT = 0x4000  # not defined in win32con - suppresses repeat-fire while held
 VK_SPACE = 0x20
+VK_OEM_3 = 0xC0  # '`~' key on US keyboards - not in win32con, and not its ASCII value
 
 # Other independent modules with a named-pipe listener that should refresh
 # their own settings whenever "reload_config" fires. taskbar isn't here -
@@ -35,7 +36,11 @@ RELOADABLE_TARGETS = ["tiling", "drag"]
 
 
 def _vk_for(key_name):
-    return VK_SPACE if key_name.lower() == "space" else ord(key_name.upper())
+    if key_name.lower() == "space":
+        return VK_SPACE
+    if key_name == "`":
+        return VK_OEM_3
+    return ord(key_name.upper())
 
 
 def _close_focused_window():

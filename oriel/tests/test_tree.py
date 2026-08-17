@@ -122,3 +122,56 @@ def test_resize_only_affects_shared_boundary_with_neighbor():
     assert root.ratios[index_a] == ratios_before[index_a] + 0.1
     assert root.ratios[index_b] == ratios_before[index_b] - 0.1
     assert root.ratios[index_c] == ratios_before[index_c]
+
+
+def test_compute_rects_ignores_min_sizes_when_ratios_already_satisfy_them():
+    root, leaf_a = tree.insert(None, None, "A", (0, 0, 100, 100))
+    root, leaf_b = tree.insert(root, leaf_a, "B", (0, 0, 100, 100))
+
+    without = tree.compute_rects(root, (0, 0, 200, 100), gap=0)
+    with_small_minimums = tree.compute_rects(
+        root, (0, 0, 200, 100), gap=0, min_sizes={"A": (10, 10), "B": (10, 10)}
+    )
+    assert without == with_small_minimums
+
+
+def test_compute_rects_grows_a_leaf_below_its_ratio_share_up_to_its_minimum():
+    root, leaf_a = tree.insert(None, None, "A", (0, 0, 100, 100))
+    root, leaf_b = tree.insert(root, leaf_a, "B", (0, 0, 100, 100))
+    # Even split would give each 150px of 300 - force B to need 250px.
+    rects = tree.compute_rects(root, (0, 0, 300, 100), gap=0, min_sizes={"B": (250, 0)})
+
+    b_width = rects[leaf_b][2] - rects[leaf_b][0]
+    a_width = rects[leaf_a][2] - rects[leaf_a][0]
+    assert b_width == 250
+    assert a_width == 50  # shrunk to give B its floor, siblings still tile exactly
+    assert a_width + b_width == 300
+
+
+def test_compute_rects_gives_up_gracefully_when_minimums_cannot_all_fit():
+    root, leaf_a = tree.insert(None, None, "A", (0, 0, 100, 100))
+    root, leaf_b = tree.insert(root, leaf_a, "B", (0, 0, 100, 100))
+    # Both demand more than half of the available 100px - impossible to
+    # satisfy both; should not raise, and each gets at least its floor.
+    rects = tree.compute_rects(root, (0, 0, 100, 100), gap=0, min_sizes={"A": (80, 0), "B": (80, 0)})
+
+    assert rects[leaf_a][2] - rects[leaf_a][0] >= 80
+    assert rects[leaf_b][2] - rects[leaf_b][0] >= 80
+
+
+def test_compute_rects_min_size_on_nested_perpendicular_container_uses_max_not_sum():
+    # A (left) | [B over C] (right, vertical sub-container) in a horizontal
+    # root split. B and C are stacked, so the right column's minimum WIDTH
+    # is the max of B/C's own minimum widths, not their sum. Total width is
+    # narrow enough that the right column's natural 50% share (100px) can't
+    # cover that max (120px), forcing A (no minimum, all slack) to shrink.
+    root, leaf_a = tree.insert(None, None, "A", (0, 0, 100, 100))
+    root, leaf_b = tree.insert(root, leaf_a, "B", (0, 0, 200, 100))  # horizontal root
+    root, leaf_c = tree.insert_nested(root, leaf_b, "C", "vertical", before=False)
+
+    rects = tree.compute_rects(
+        root, (0, 0, 200, 100), gap=0, min_sizes={"B": (120, 0), "C": (90, 0)}
+    )
+    right_column_width = rects[leaf_b][2] - rects[leaf_b][0]
+    assert right_column_width == 120  # max(120, 90), not sum (210)
+    assert rects[leaf_b][2] - rects[leaf_b][0] == rects[leaf_c][2] - rects[leaf_c][0]

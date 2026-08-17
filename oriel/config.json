@@ -15,7 +15,8 @@
     { "modifiers": ["alt", "ctrl"], "key": "J", "target": "tiling", "action": "move_down" },
     { "modifiers": ["alt", "ctrl", "shift"], "key": "L", "target": "tiling", "action": "resize_grow" },
     { "modifiers": ["alt", "ctrl", "shift"], "key": "H", "target": "tiling", "action": "resize_shrink" },
-    { "modifiers": ["alt", "shift"], "key": "R", "target": "hotkeyd", "action": "reload_config" }
+    { "modifiers": ["alt", "shift"], "key": "R", "target": "hotkeyd", "action": "reload_config" },
+    { "modifiers": ["alt"], "key": "`", "target": "taskbar", "action": "toggle" }
   ],
   "taskbar": {
     "enabled": true,

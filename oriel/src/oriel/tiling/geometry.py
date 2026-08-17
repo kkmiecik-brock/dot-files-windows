@@ -145,6 +145,34 @@ def invalidate_frame_margins(hwnd):
     _frame_margin_cache.pop(hwnd, None)
 
 
+# hwnd -> (min_width, min_height), in the same frame-inclusive coordinate
+# space as GetWindowRect/SetWindowPos. Learned reactively from an actual
+# observed resize clamp (see state.py's reflow) rather than queried
+# speculatively via WM_GETMINMAXINFO - most windows have no real floor
+# worth tracking, so this only grows for the ones that actually enforce one.
+_min_size_cache = {}
+
+
+def learn_min_size(hwnd, width, height):
+    """Records/grows hwnd's observed minimum size. Returns True if this
+    changes what was already known, so a caller can trigger a re-layout
+    only when there's actually new information."""
+    existing = _min_size_cache.get(hwnd, (0, 0))
+    updated = (max(existing[0], width), max(existing[1], height))
+    if updated != existing:
+        _min_size_cache[hwnd] = updated
+        return True
+    return False
+
+
+def min_size(hwnd):
+    return _min_size_cache.get(hwnd, (0, 0))
+
+
+def invalidate_min_size(hwnd):
+    _min_size_cache.pop(hwnd, None)
+
+
 def expand_rect_for_frame(rect, hwnd):
     """Expands a logical target rect outward by hwnd's own frame margins, so
     the visible DWM frame lands exactly on `rect` once passed to SetWindowPos."""

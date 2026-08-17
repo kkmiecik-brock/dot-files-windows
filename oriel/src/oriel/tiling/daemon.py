@@ -25,6 +25,7 @@ ACTIONS = {
     "reload": lambda _data=None: events.post(events.reload_settings),
     "toggle_fullscreen": lambda _data=None: events.post(events.toggle_fullscreen),
     "record_drag_kind": lambda data=None: events.post(events.record_drag_kind, data),
+    "reflow": lambda _data=None: events.post(events.reflow_all),
 }
 
 
