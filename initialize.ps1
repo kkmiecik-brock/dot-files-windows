@@ -73,7 +73,20 @@ foreach ($item in "src", "tests", "main.py", "pyproject.toml", "config.json") {
 }
 Write-Host "  Copied to $orielDst" -ForegroundColor Green
 
-# -- 5. PowerToys settings -----------------------------------------------------
+# -- 5. Oriel autostart shortcut ------------------------------------------------
+
+Write-Host "`nCreating oriel Startup shortcut..." -ForegroundColor Cyan
+$pythonwExe = (Get-Command python).Source -replace "python\.exe$", "pythonw.exe"
+$orielShortcutPath = Join-Path ([Environment]::GetFolderPath("Startup")) "Oriel.lnk"
+$wshShell = New-Object -ComObject WScript.Shell
+$orielShortcut = $wshShell.CreateShortcut($orielShortcutPath)
+$orielShortcut.TargetPath = $pythonwExe
+$orielShortcut.Arguments = "`"$(Join-Path $orielDst 'main.py')`""
+$orielShortcut.WorkingDirectory = $orielDst
+$orielShortcut.Save()
+Write-Host "  Created: $orielShortcutPath" -ForegroundColor Green
+
+# -- 6. PowerToys settings -----------------------------------------------------
 
 Write-Host "`nCopying PowerToys settings..." -ForegroundColor Cyan
 Get-Process -Name "PowerToys*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
