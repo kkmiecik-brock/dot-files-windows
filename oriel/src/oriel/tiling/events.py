@@ -48,6 +48,15 @@ logger = logging.getLogger(__name__)
 MAX_MANAGEABLE_RETRIES = 5
 RETRY_INTERVAL = 0.15
 
+# How long a hide/cloak notification has to keep looking real before it's
+# actually acted on (see on_window_hidden/_tick_pending_hides) - live-
+# confirmed some apps (e.g. Windows Terminal) get briefly, spuriously
+# cloaked/uncloaked during fast focus switching between two of their own
+# windows, well under this window. Reacting immediately removed the tile
+# and re-inserted it moments later, visible as the border (and the tile
+# itself) flickering out and back for no user-visible reason.
+HIDE_DEBOUNCE_SECONDS = 0.2
+
 _state = None
 
 # hwnd -> retry count, for hwnds that failed is_manageable() at least once
@@ -57,6 +66,12 @@ _state = None
 # genuinely be too early. Cleaned up in on_window_destroyed so this can't
 # grow unbounded for windows that are never actually manageable.
 _manageable_retries = {}
+
+# hwnd -> monotonic timestamp of its most recent hide/cloak notification,
+# for hwnds waiting out HIDE_DEBOUNCE_SECONDS before on_window_hidden's
+# effect is actually applied (see _tick_pending_hides). Cleaned up in
+# on_window_destroyed.
+_pending_hides = {}
 
 # hwnds currently inside a bracketed EVENT_SYSTEM_MOVESIZESTART/END gesture
 # (native OS drag or drag.py's custom alt+drag - both emit this bracket) -
@@ -95,6 +110,92 @@ _margin_revalidated = set()
 # cheaply skip re-evaluating the border for the many unrelated windows that
 # fire it, only reacting when the bordered window itself moves/resizes.
 _bordered_hwnd = None
+
+# Single persistent worker (not a fresh threading.Thread per call, and not
+# a plain FIFO queue either) applying border-effect work - DwmSetWindowAttribute
+# has no async variant and is a cross-process RPC to the DWM compositor, so
+# it must never run on the message-loop thread (see update_focus_border). A
+# FIFO queue isn't right because a burst of rapid calls (e.g. a window's
+# open animation firing many LOCATIONCHANGE events) would queue up a
+# growing backlog of blocking DWM calls behind each other, reintroducing
+# the freeze. Instead only the LATEST desired (highlight, color,
+# corner_style) is ever kept - producers overwrite it and never block, and
+# the worker applies whatever is newest whenever it's free, coalescing away
+# any superseded intermediate states.
+#
+# Deliberately NOT tracking which hwnd to clear in the pending tuple - an
+# earlier version had producers precompute that too (relative to
+# _bordered_hwnd at enqueue time), but that's unsound under coalescing: if
+# focus chains through several windows before the worker wakes (e.g.
+# C -> A -> B -> A while the worker is mid-throttle-sleep), only the final
+# pending entry survives, so an intermediate "clear C" can be coalesced
+# away entirely even though C's real border was never actually cleared in
+# DWM - live-confirmed as two windows simultaneously showing a border after
+# rapid focus switching. Instead the worker tracks applied_hwnd itself
+# (below), reflecting only what it has actually told DWM, immune to
+# coalescing, and always clears relative to that.
+_border_condition = threading.Condition()
+_border_pending = None
+_border_pending_valid = False
+
+# Coalescing alone isn't enough during a burst (e.g. a window's open
+# animation firing many LOCATIONCHANGE events): DWM itself is the
+# contended resource this whole feature fights (the original freeze was
+# DWM already busy compositing a slow-starting app), so even one thread
+# issuing back-to-back blocking DwmSetWindowAttribute/SetWindowPos calls as
+# fast as each returns can still pile onto that same contention and
+# reintroduce the freeze - reducing thread/queue count doesn't cap *call
+# rate*. Spacing consecutive applies apart bounds how often the worker
+# hits DWM regardless of how fast events arrive, while still coalescing to
+# whatever's newest each time it wakes.
+_BORDER_MIN_INTERVAL_SECONDS = 0.15
+
+
+def _border_worker():
+    global _border_pending, _border_pending_valid
+    applied_hwnd = None  # only this thread ever writes this - reflects real DWM state
+    last_applied = 0.0
+    while True:
+        with _border_condition:
+            while not _border_pending_valid:
+                _border_condition.wait()
+            highlight, color, corner_style = _border_pending
+            _border_pending_valid = False
+
+        remaining = _BORDER_MIN_INTERVAL_SECONDS - (time.monotonic() - last_applied)
+        if remaining > 0:
+            time.sleep(remaining)
+            with _border_condition:
+                if _border_pending_valid:
+                    # something newer arrived while throttling - apply that instead
+                    highlight, color, corner_style = _border_pending
+                    _border_pending_valid = False
+
+        try:
+            if applied_hwnd is not None and applied_hwnd != highlight and win32gui.IsWindow(applied_hwnd):
+                border.clear_border(applied_hwnd)
+            if highlight is not None:
+                # Always reapplied, even when unchanged from last time (not
+                # gated on applied_hwnd != highlight) - DwmSetWindowAttribute's
+                # HRESULT is never checked (see _set_attribute) and even a
+                # successful call doesn't guarantee DWM actually repaints the
+                # frame (see _force_frame_redraw's own comment) - live-
+                # confirmed the exact failure this causes: the decision and
+                # bookkeeping were both provably correct (GetForegroundWindow()
+                # and the last logged apply agreed), yet no border was
+                # visible, with nothing left to ever retry it since our own
+                # state thought it had already succeeded. Reapplying on every
+                # tick (~every RETRY_INTERVAL while something is focused) self
+                # -heals that silent failure within one cycle instead of
+                # leaving it stuck until the next real focus change.
+                border.set_border(highlight, color, corner_style)
+            applied_hwnd = highlight
+        except Exception:
+            logger.exception("border worker failed for applied=%s highlight=%s", applied_hwnd, highlight)
+        last_applied = time.monotonic()
+
+
+threading.Thread(target=_border_worker, daemon=True).start()
 
 # hwnds that just got their first-ever SetWindowPos and need exactly one
 # ASYNC follow-up reposition shortly after (see _tick_repaint_nudges) - a
@@ -217,20 +318,42 @@ def update_focus_border():
     window isn't one of oriel's tiled windows (untracked, or on a workspace
     that isn't currently active on its monitor). Always unconditionally
     re-applies rather than skipping when "nothing changed" per internal
-    tracking - enforce_tiled_placement's SetWindowPos calls (which reposition
-    a tiled window back onto its tile on every focus/location change) can
-    silently reset DWM's border attribute as a side effect, so trusting
-    _bordered_hwnd alone isn't reliable; re-asserting is cheap and safe.
+    tracking, since trusting _bordered_hwnd alone isn't reliable and
+    re-asserting is cheap.
 
-    DISABLED (2026-08-18): live-isolated as a real cause of the Windows
-    Terminal freeze/spinner - DwmSetWindowAttribute is a cross-process RPC
-    to the DWM compositor, and calling it here on every focus/location
-    change compounded with a slow-starting app's own DWM/compositor work.
-    Confirmed via controlled A/B toggling (disabling this alone resolved the
-    hang; re-enabling reproduced it). Left off deliberately until a proper
-    fix is designed - not a temporary debug leftover."""
-    return
-    global _bordered_hwnd
+    Called both reactively (EVENT_SYSTEM_FOREGROUND, and
+    EVENT_OBJECT_LOCATIONCHANGE whenever the bordered window itself moves -
+    see _win_event_proc) and continuously via _tick_focus_border() on the
+    shared MANAGEABLE_RETRY_TIMER tick (~every RETRY_INTERVAL) - the
+    reactive calls give snappy response to real focus changes, but relying
+    on WinEvents alone is fragile: rapid focus switching (e.g. alt-tab) can
+    leave the border missing entirely, because Windows' own switcher UI
+    (ForegroundStaging/XamlExplorerHostIslandWindow) transiently becomes the
+    foreground window BETWEEN real app focus events, and if that transient
+    "nothing to highlight" read happens to be the last one before events
+    stop, nothing was left to trigger a correction (confirmed live - an
+    earlier one-shot "settle timer" fix for this was itself just a single
+    extra sample, so it could still theoretically land on the same race,
+    just less often). Continuously re-deriving this from a fresh
+    GetForegroundWindow() read on a fixed cadence removes the dependency on
+    WinEvent ordering entirely: whatever the last tick got wrong, the next
+    tick - at most RETRY_INTERVAL later - checks the live truth again and
+    self-corrects, forever, with no special-cased retry logic needed.
+
+    The actual DwmSetWindowAttribute/SetWindowPos calls run on the single
+    persistent _border_worker thread, not here - DwmSetWindowAttribute is a
+    cross-process RPC to the DWM compositor with no async variant, and
+    live-isolated as a real cause of the Windows Terminal freeze/spinner
+    (confirmed via controlled A/B toggling: disabling this alone resolved
+    the hang). GlazeWM hits the same "no async DWM call" constraint for
+    this identical feature and solves it the same way - dispatch the call
+    off its main event-processing thread (their tokio::task::spawn) so a
+    slow/blocked DWM call can never stall anything else. Only the decision
+    (which hwnd to highlight) and the _bordered_hwnd bookkeeping happen
+    inline here - which hwnd to clear is decided by the worker itself
+    against its own applied_hwnd, not precomputed here (see _border_worker
+    for why)."""
+    global _bordered_hwnd, _border_pending, _border_pending_valid
     highlight = None
     if _state.border.get("enabled", True):
         fg = win32gui.GetForegroundWindow()
@@ -239,11 +362,23 @@ def update_focus_border():
             if leaf is not None and workspace == _state.active_workspace(monitor):
                 highlight = fg
 
-    if _bordered_hwnd is not None and _bordered_hwnd != highlight and win32gui.IsWindow(_bordered_hwnd):
-        border.clear_border(_bordered_hwnd)
-    if highlight is not None:
-        border.set_border(highlight, _hex_to_colorref(_state.border["color"]), _state.border["corner_style"])
+    color = _hex_to_colorref(_state.border["color"]) if highlight is not None else None
+    corner_style = _state.border["corner_style"] if highlight is not None else None
+
+    with _border_condition:
+        _border_pending = (highlight, color, corner_style)
+        _border_pending_valid = True
+        _border_condition.notify()
     _bordered_hwnd = highlight
+
+
+def _tick_focus_border():
+    """Runs on every MANAGEABLE_RETRY_TIMER tick (see run_message_loop),
+    same shared timer _tick_manageable_retries/_tick_repaint_nudges use -
+    see update_focus_border's docstring for why this continuous re-check
+    exists rather than relying on WinEvents (+ a one-shot settle timer)
+    alone."""
+    update_focus_border()
 
 
 # --- Window lifecycle ---------------------------------------------------------
@@ -467,14 +602,45 @@ def enforce_tiled_placement(hwnd):
     _state.reflow(monitor, workspace)
 
 
+def _closest_sibling_leaf(leaf):
+    """The leaf that should get focus once `leaf` is removed - its nearest
+    remaining sibling in the parent container (previous, else next), or
+    the first leaf within it if that sibling is itself a nested container
+    rather than a single window. Must be computed BEFORE the leaf is
+    actually removed from the tree (see _unmanage) - parent.children still
+    needs to include `leaf` to find its position."""
+    parent = leaf.parent
+    if parent is None:
+        return None
+    children = parent.children
+    index = children.index(leaf)
+    if index > 0:
+        sibling = children[index - 1]
+    elif len(children) > 1:
+        sibling = children[index + 1]
+    else:
+        return None
+    leaves = tree.all_leaves(sibling)
+    return leaves[0] if leaves else None
+
+
 def _unmanage(monitor, workspace, leaf):
     """Shared tail of on_window_destroyed/on_window_hidden - both remove a
     leaf from the tree the same way, once their own (different) entry
-    guards decide the window is really gone/hidden for good."""
+    guards decide the window is really gone/hidden for good. If the
+    removed window was the focused one, hands focus to the closest
+    remaining window in the same split instead of leaving it to Windows'
+    own next-in-Z-order default, which is often a completely different
+    window than whatever visually took over this one's tile."""
+    was_focused = leaf.item == _bordered_hwnd
+    next_focus = _closest_sibling_leaf(leaf) if was_focused else None
     _state.remove_leaf(monitor, leaf, workspace)
     _state.reflow(monitor, workspace)
     _persist_workspace_state(monitor)
-    if leaf.item == _bordered_hwnd:
+    if next_focus is not None and win32gui.IsWindow(next_focus.item):
+        _state.set_focused_leaf(monitor, next_focus, workspace)
+        _force_foreground(next_focus.item)
+    if was_focused:
         update_focus_border()
 
 
@@ -484,6 +650,7 @@ def on_window_destroyed(hwnd):
     _enforce_attempt_times.pop(hwnd, None)
     _pending_repaint_nudges.discard(hwnd)
     _margin_revalidated.discard(hwnd)
+    _pending_hides.pop(hwnd, None)
     monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None:
         return
@@ -496,10 +663,18 @@ def on_window_hidden(hwnd):
     destroyed window is, but EVENT_OBJECT_SHOW/UNCLOAKED can re-manage it
     later via on_window_shown - without this, a hidden/cloaked window was a
     permanent "ghost tile", consuming layout space for a window nobody can
-    see, with no cleanup path at all."""
-    # Guard against stale/out-of-order notifications - a hide/cloak event
-    # can still arrive after the window already became visible again, so
-    # only actually unmanage once native state confirms it's still hidden.
+    see, with no cleanup path at all.
+
+    Doesn't unmanage immediately - just records the notification and lets
+    _tick_pending_hides act on it after HIDE_DEBOUNCE_SECONDS, still true.
+    Some apps (confirmed live: Windows Terminal) briefly cloak/uncloak
+    themselves during fast focus switching between two of their own
+    windows, well under that delay - reacting immediately removed the tile
+    and reinserted it moments later, visibly flickering the tile and its
+    border for no real reason. A stale hide notification that's since
+    reversed is naturally caught by _tick_pending_hides re-checking live
+    state before actually unmanaging, exactly like the immediate guard
+    this replaces used to."""
     if win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd) and not is_cloaked(hwnd):
         return
     monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
@@ -507,7 +682,29 @@ def on_window_hidden(hwnd):
         return
     if workspace != _state.active_workspace(monitor):
         return  # hidden because its workspace isn't active right now - our own switch-away, not a real hide
-    _unmanage(monitor, workspace, leaf)
+    _pending_hides[hwnd] = time.monotonic()
+
+
+def _tick_pending_hides():
+    """Runs on every MANAGEABLE_RETRY_TIMER tick (see run_message_loop) -
+    same shared timer the other _tick_* functions use. Re-checks live state
+    rather than trusting the original notification or any captured
+    monitor/workspace/leaf, since on_window_shown may have already
+    re-managed the hwnd (a fresh leaf) if it came back before this tick, or
+    the hwnd may be gone entirely (on_window_destroyed clears it out)."""
+    now = time.monotonic()
+    for hwnd, seen_at in list(_pending_hides.items()):
+        if now - seen_at < HIDE_DEBOUNCE_SECONDS:
+            continue
+        _pending_hides.pop(hwnd, None)
+        if win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd) and not is_cloaked(hwnd):
+            continue  # came back within the debounce window - never really left
+        monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
+        if leaf is None:
+            continue
+        if workspace != _state.active_workspace(monitor):
+            continue
+        _unmanage(monitor, workspace, leaf)
 
 
 # --- Focus / move / resize hotkey commands ------------------------------------
@@ -843,6 +1040,11 @@ def _win_event_proc(hWinEventHook, event, hwnd, idObject, idChild, idEventThread
         elif event == EVENT_OBJECT_LOCATIONCHANGE:
             recheck_if_pending(hwnd)
             enforce_tiled_placement(hwnd)
+            # Only reapply for the already-bordered window itself, never
+            # for unrelated windows' location changes - keeps the border
+            # tracking it live even mid-drag (native or alt+drag) now that
+            # the coalescing + throttled worker (see _border_worker) bounds
+            # the actual DWM call rate regardless of how fast these fire.
             if hwnd == _bordered_hwnd:
                 update_focus_border()
     except Exception:
@@ -904,6 +1106,8 @@ def run_message_loop():
             if msg.message == WM_TIMER and msg.wParam == manageable_retry_timer_id:
                 _tick_manageable_retries()
                 _tick_repaint_nudges()
+                _tick_pending_hides()
+                _tick_focus_border()
                 continue
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
