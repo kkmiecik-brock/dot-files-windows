@@ -118,8 +118,8 @@ def get_process_name(hwnd):
         win32api.CloseHandle(handle)
 
 
-def is_manageable(hwnd):
-    if not _passes_structural_gate(hwnd):
+def is_manageable(hwnd, require_visible=True):
+    if not _passes_structural_gate(hwnd, require_visible=require_visible):
         return False
     style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
     if not (style & win32con.WS_CAPTION):
@@ -142,14 +142,22 @@ def is_manageable(hwnd):
     return True
 
 
-def _passes_structural_gate(hwnd):
+def _passes_structural_gate(hwnd, require_visible=True):
     """The properties checked here describe what KIND of window this
     fundamentally is - a popup/tool-window/owned-helper never becomes a
     real app window no matter how long you wait, unlike WS_CAPTION/chrome/
     title (checked in is_manageable, not here), which a genuinely-
     initializing app window can still gain moments after first appearing
-    (the Firefox timing gotcha the retry logic below exists for)."""
-    if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+    (the Firefox timing gotcha the retry logic below exists for).
+
+    require_visible=False skips the visibility/iconic check specifically -
+    for re-tracking a window bootstrap already has persisted history for
+    (see events.bootstrap_existing_windows) that's currently hidden simply
+    because it was on an inactive workspace when oriel last reset/
+    restarted, not because it's genuinely gone. is_cloaked is still always
+    checked either way - that's a different kind of hidden (another
+    virtual desktop), handled separately by the hide/cloak lifecycle."""
+    if require_visible and (not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd)):
         return False
     if is_cloaked(hwnd):
         return False

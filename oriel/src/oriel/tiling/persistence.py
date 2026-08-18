@@ -34,6 +34,22 @@ def entry_for(monitor, persisted):
     return persisted.get(stable_id)
 
 
+def find_hwnd_workspace(hwnd, persisted):
+    """Searches every persisted monitor entry (not just one) for hwnd's
+    recorded workspace - None if it has no persisted history anywhere.
+    Needed because a monitor's stable id isn't guaranteed to stay the same
+    across sessions (e.g. an RDP session presents a generic "Remote_Monitor"
+    identity instead of the real monitor's), so a window's own current
+    monitor may not match whichever identity it was originally recorded
+    under, even though the window and its intended workspace didn't
+    actually change."""
+    for entry in persisted.values():
+        workspace = entry.get("windows", {}).get(str(hwnd))
+        if workspace is not None:
+            return workspace
+    return None
+
+
 def save_monitor(tiling_state, monitor):
     """Read-modify-write so only this monitor's entry changes - others are
     left exactly as last saved."""

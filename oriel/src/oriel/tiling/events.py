@@ -487,15 +487,41 @@ def bootstrap_existing_windows():
     # window ends up last-inserted, roughly matching what you'd expect to
     # see "on top" of the initial layout.
     for hwnd in reversed(handles):
-        if is_manageable(hwnd):
-            monitor = geometry.monitor_of(hwnd)
-            entry = persistence.entry_for(monitor, persisted)
-            workspace = entry.get("windows", {}).get(str(hwnd)) if entry else None
-            if workspace is None:
-                workspace = _state.active_workspace(monitor)
-            _state.insert_hwnd(monitor, hwnd, workspace)
+        if not win32gui.IsWindow(hwnd):
+            continue
+        monitor = geometry.monitor_of(hwnd)
+        entry = persistence.entry_for(monitor, persisted)
+        workspace = entry.get("windows", {}).get(str(hwnd)) if entry else None
+        if workspace is None:
+            # Not found under this hwnd's CURRENT monitor's own persisted
+            # entry - a monitor's stable id isn't guaranteed to stay the
+            # same across sessions (e.g. RDP presents a generic
+            # "Remote_Monitor" identity in place of the real one) even
+            # though the window itself and its intended workspace didn't
+            # change, so search every OTHER persisted monitor entry too
+            # before concluding this hwnd has no known assignment at all.
+            workspace = persistence.find_hwnd_workspace(hwnd, persisted)
+
+        if workspace is not None:
+            # Known from persisted history - re-track it even if it's
+            # currently hidden (e.g. it was on an inactive workspace when
+            # oriel last reset/restarted). is_manageable()'s default
+            # visibility requirement would otherwise reject it for exactly
+            # that reason, silently and permanently orphaning it - nothing
+            # else ever re-discovers an already-existing hidden window
+            # once bootstrap has skipped it (no new SHOW/UNCLOAKED event
+            # is coming for a window that's just sitting there hidden).
+            if is_manageable(hwnd, require_visible=False):
+                _state.insert_hwnd(monitor, hwnd, workspace)
+                if workspace != _state.active_workspace(monitor) and win32gui.IsWindowVisible(hwnd):
+                    win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+        elif is_manageable(hwnd):
+            # No persisted history anywhere - only a genuinely fresh,
+            # currently-visible app window qualifies as a new discovery.
+            _state.insert_hwnd(monitor, hwnd, _state.active_workspace(monitor))
     _state.reflow_all()
     update_focus_border()
+
 
 
 # --- Display change handling ---------------------------------------------------
@@ -611,6 +637,16 @@ def on_window_shown(hwnd):
         # workspace into view, same as any other tiled window not on the
         # active workspace (see switch_workspace's own hide/show pairing).
         win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+    elif win32gui.IsWindow(hwnd):
+        # A window launched from a background process (e.g. hotkeyd's
+        # os.startfile via a hotkey) doesn't reliably get real OS foreground
+        # focus on its own - Windows' foreground-lock restriction can deny
+        # it, the same restriction _force_foreground exists to bypass
+        # elsewhere in this file. Confirmed live: opening a new Windows
+        # Terminal via Alt+T left GetForegroundWindow() still pointing at
+        # whatever was focused before, so it never got the focus border -
+        # not a border bug, the window just never actually became focused.
+        _force_foreground(hwnd)
     _pending_repaint_nudges.add(hwnd)
     _persist_workspace_state(monitor)
     update_focus_border()
