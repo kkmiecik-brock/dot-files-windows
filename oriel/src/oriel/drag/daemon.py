@@ -28,6 +28,7 @@ import win32process
 from oriel.config import get_section
 from oriel.ipc import send_action, serve_actions
 from oriel.logging_setup import configure_logging
+from oriel.single_instance import ensure_single_instance
 
 logger = logging.getLogger(__name__)
 
@@ -286,11 +287,25 @@ def _reload(_data=None):
     settings = _load_settings()
 
 
-ACTIONS = {"reload": _reload}
+WM_QUIT = 0x0012
+_main_thread_id = None
+
+
+def _quit(_data=None):
+    """IPC "quit" action - posts WM_QUIT to the message-loop thread so
+    GetMessageW returns 0 and the process exits (mirrors tiling.events'
+    quit_daemon; see its docstring for why this is sufficient cleanup)."""
+    if _main_thread_id is not None:
+        user32.PostThreadMessageW(_main_thread_id, WM_QUIT, 0, 0)
+
+
+ACTIONS = {"reload": _reload, "quit": _quit}
 
 
 def run():
     configure_logging("drag")
+    if not ensure_single_instance("drag"):
+        return
     try:
         _run()
     except Exception:
@@ -299,7 +314,8 @@ def run():
 
 
 def _run():
-    global hook_handle, settings
+    global hook_handle, settings, _main_thread_id
+    _main_thread_id = win32api.GetCurrentThreadId()
 
     # Without DPI awareness, Windows can virtualize/scale the coordinates this
     # process sees, causing drag offsets to drift relative to true pixels.

@@ -105,6 +105,13 @@ class TilingState:
     def known_monitors(self):
         return {monitor for monitor, _workspace in self._roots}
 
+    def all_monitor_workspaces(self):
+        """Every (monitor, workspace) pair with a root, active or not -
+        for callers that need to touch every tracked window regardless of
+        which workspace is currently showing (e.g. the quit teardown,
+        which un-hides everything, not just the active workspace)."""
+        return list(self._roots.keys())
+
     def migrate_workspace(self, monitor, from_workspace, to_workspace):
         """Re-keys everything under (monitor, from_workspace) to (monitor,
         to_workspace) - for a monitor whose workspace config just went from

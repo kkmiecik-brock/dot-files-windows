@@ -9,6 +9,7 @@ import logging
 
 from oriel.ipc import serve_actions
 from oriel.logging_setup import configure_logging
+from oriel.single_instance import ensure_single_instance
 from oriel.tiling import events
 from oriel.tiling import geometry
 from oriel.tiling.state import TilingState
@@ -32,11 +33,15 @@ ACTIONS = {
     "reflow": lambda _data=None: events.post(events.reflow_all),
     "switch_workspace": lambda data=None: events.post(events.switch_workspace_action, data),
     "move_to_workspace": lambda data=None: events.post(events.move_to_workspace_action, data),
+    "expect_autostart_window": lambda data=None: events.post(events.register_autostart_window, data),
+    "quit": lambda _data=None: events.quit_daemon(),
 }
 
 
 def run():
     configure_logging("tiling")
+    if not ensure_single_instance("tiling"):
+        return
     try:
         # Must happen before any window/monitor enumeration - see geometry.py's
         # ensure_dpi_awareness() docstring for why.

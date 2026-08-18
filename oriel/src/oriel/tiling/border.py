@@ -13,6 +13,7 @@ import win32gui
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
 DWMWA_BORDER_COLOR = 34
 DWMWA_COLOR_NONE = 0xFFFFFFFE  # sentinel: no accent border / OS default
+DWMWCP_ROUND = 2  # Windows 11's normal default corner look, independent of CORNER_STYLES config
 
 CORNER_STYLES = {"square": 1, "rounded": 2, "small_rounded": 3}
 
@@ -51,7 +52,28 @@ def set_border(hwnd, colorref, corner_style):
     _force_frame_redraw(hwnd)
 
 
+def ensure_rounded(hwnd):
+    """Applies Windows 11's normal rounded-corner look without touching
+    border color at all - for a window that's never been through
+    set_border/clear_border yet (e.g. autostarted straight onto a hidden,
+    inactive workspace, never focused) and would otherwise keep whatever
+    corner state the app itself set by default (observed: Teams starts
+    non-round). Called once when a window is first managed (see
+    events.on_window_shown), independent of the focus-border feature."""
+    _set_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
+    _force_frame_redraw(hwnd)
+
+
 def clear_border(hwnd):
     _set_attribute(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE)
+    # set_border can leave DWMWA_WINDOW_CORNER_PREFERENCE at a non-round
+    # value (e.g. corner_style="square"/"small_rounded") - without
+    # resetting it here too, an unfocused window stays stuck looking that
+    # way forever instead of Windows 11's normal rounded look. Some apps
+    # (observed: Teams) also appear to end up non-round on their own the
+    # first time they're seen, before ever being focused/set_border'd at
+    # all - resetting unconditionally on every clear (not just when
+    # transitioning from a known non-default value) covers that case too.
+    _set_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
     _force_frame_redraw(hwnd)
 

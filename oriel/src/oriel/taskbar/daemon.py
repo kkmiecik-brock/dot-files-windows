@@ -17,6 +17,7 @@ import win32gui
 from oriel.config import get_section
 from oriel.ipc import send_action, serve_actions
 from oriel.logging_setup import configure_logging
+from oriel.single_instance import ensure_single_instance
 
 logger = logging.getLogger(__name__)
 
@@ -77,14 +78,29 @@ def toggle(_data=None):
     _apply(_override)
 
 
-ACTIONS = {"toggle": toggle}
+_stop_event = threading.Event()
+
+
+def _quit(_data=None):
+    """IPC "quit" action - restores the taskbar first (a hidden taskbar
+    with the daemon that hides/shows it gone would be stuck hidden until
+    oriel restarts), then signals the poll loop to stop via _stop_event
+    rather than a blind time.sleep, so this doesn't wait out a full
+    poll_interval to actually exit."""
+    _set_taskbar_visible(True)
+    _stop_event.set()
+
+
+ACTIONS = {"toggle": toggle, "quit": _quit}
 
 
 def run():
     configure_logging("taskbar")
+    if not ensure_single_instance("taskbar"):
+        return
     threading.Thread(target=serve_actions, args=("taskbar", ACTIONS), daemon=True).start()
     poll_interval = DEFAULTS["poll_interval"]
-    while True:
+    while not _stop_event.is_set():
         try:
             settings = _load_settings()
             poll_interval = settings["poll_interval"]
@@ -92,4 +108,5 @@ def run():
             _apply(should_hide)
         except Exception:
             logger.exception("taskbar poll loop failed")
-        time.sleep(poll_interval)
+        if _stop_event.wait(timeout=poll_interval):
+            break

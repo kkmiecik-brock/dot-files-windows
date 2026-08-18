@@ -208,6 +208,23 @@ def subtract_taskbar(bounds, taskbar_rect):
     return (tr, mt, mr, mb) if tl <= ml else (ml, mt, tl, mb)  # docked left or right
 
 
+def taskbar_rect(monitor):
+    """Same hwnd lookup as visible_taskbar_rect but WITHOUT the visibility
+    check - for callers that need the taskbar's real screen position
+    regardless of whether oriel.taskbar currently has it hidden (e.g. the
+    tiling daemon's quit teardown, which runs concurrently with - and isn't
+    guaranteed to run after - oriel.taskbar's own "show it again" quit
+    teardown, so it can't depend on the taskbar already being visible by
+    the time it runs)."""
+    hwnd = _taskbar_hwnd_cache.get(monitor)
+    if hwnd is None or not win32gui.IsWindow(hwnd):
+        hwnd = _find_taskbar_hwnd(monitor)
+        if hwnd is None:
+            return None
+        _taskbar_hwnd_cache[monitor] = hwnd
+    return win32gui.GetWindowRect(hwnd)
+
+
 def work_area(monitor, outer_gap):
     bounds = monitor_bounds(monitor)
     taskbar_rect = visible_taskbar_rect(monitor)

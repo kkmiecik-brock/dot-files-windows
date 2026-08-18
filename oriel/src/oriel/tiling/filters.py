@@ -104,7 +104,7 @@ def _is_ignored(process_name, class_name, title):
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 
-def _get_process_name(hwnd):
+def get_process_name(hwnd):
     try:
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
         handle = win32api.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -135,7 +135,7 @@ def is_manageable(hwnd):
         return False
 
     class_name = geometry.safe_get_class_name(hwnd)
-    process_name = _get_process_name(hwnd)
+    process_name = get_process_name(hwnd)
     if _is_ignored(process_name, class_name, title):
         return False
 

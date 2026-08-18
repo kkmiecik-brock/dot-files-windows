@@ -30,6 +30,7 @@ import win32gui
 from oriel.config import load_config
 from oriel.ipc import send_action
 from oriel.logging_setup import configure_logging
+from oriel.single_instance import ensure_single_instance
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ WM_SYSKEYUP = 0x0105    # every binding here requires Alt, so this is the common
 
 VK_SPACE = 0x20
 VK_OEM_3 = 0xC0  # '`~' key on US keyboards - not in win32con, and not its ASCII value
+VK_ESCAPE = 0x1B  # win32con.VK_ESCAPE isn't exposed for pywin32's WH_KEYBOARD_LL path
 
 # vkCode -> normalized modifier name, covering both left/right variants -
 # WH_KEYBOARD_LL reports the specific L/R vkCode, never the generic one.
@@ -58,6 +60,12 @@ MODIFIER_VKS = {
 # their own settings whenever "reload_config" fires. taskbar isn't here -
 # it already re-reads config.json every poll_interval on its own.
 RELOADABLE_TARGETS = ["tiling", "drag"]
+
+# Every other daemon process to tear down for "quit_oriel" - NOT autostart
+# (it already ran once and exited, nothing to tear down) and deliberately
+# never touches any app autostart itself launched (Teams etc.) - those are
+# independent processes with no lifetime tie to oriel at all.
+QUIT_TARGETS = ["tiling", "drag", "taskbar"]
 
 # Actions whose hotkey args carry data the target needs (e.g. which
 # workspace number) - forwarded as the IPC payload. Every other tiling
@@ -121,6 +129,8 @@ _pending_bindings = queue.Queue()
 def _vk_for(key_name):
     if key_name.lower() == "space":
         return VK_SPACE
+    if key_name.lower() == "escape":
+        return VK_ESCAPE
     if key_name == "`":
         return VK_OEM_3
     return ord(key_name.upper())
@@ -139,9 +149,20 @@ def _launch(args):
     os.startfile(args["target"], arguments=args.get("args") or "", cwd=args.get("cwd") or None)
 
 
+def _quit_oriel():
+    """Tears down every other oriel daemon, then this one - runs on the
+    message-loop thread already (see _handle_binding), so PostQuitMessage
+    posts WM_QUIT to the right queue directly, no PostThreadMessageW/thread
+    id needed the way the other daemons' own "quit" handlers do."""
+    for target in QUIT_TARGETS:
+        send_action(target, "quit")
+    user32.PostQuitMessage(0)
+
+
 LOCAL_ACTIONS = {
     "launch": lambda args: _launch(args),
     "close_focused": lambda args: _close_focused_window(),
+    "quit_oriel": lambda _args=None: _quit_oriel(),
 }
 
 
@@ -218,6 +239,8 @@ def _handle_binding(binding):
 
 def run():
     configure_logging("hotkeyd")
+    if not ensure_single_instance("hotkeyd"):
+        return
     try:
         _run()
     except Exception:

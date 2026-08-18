@@ -16,6 +16,7 @@
     { "modifiers": ["alt", "ctrl", "shift"], "key": "L", "target": "tiling", "action": "resize_grow" },
     { "modifiers": ["alt", "ctrl", "shift"], "key": "H", "target": "tiling", "action": "resize_shrink" },
     { "modifiers": ["alt", "shift"], "key": "R", "target": "hotkeyd", "action": "reload_config" },
+    { "modifiers": ["alt", "shift"], "key": "Escape", "target": "hotkeyd", "action": "quit_oriel" },
     { "modifiers": ["alt", "ctrl"], "key": "`", "target": "taskbar", "action": "toggle" },
     { "modifiers": ["alt"], "key": "1", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 1 } },
     { "modifiers": ["alt"], "key": "2", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 2 } },
@@ -76,6 +77,12 @@
       { "process": "winword.exe", "class_not": "OpusApp" },
       { "process": "powerpnt.exe", "class_not": "PPTFrameClass" },
       { "class": "ApplicationFrameWindow", "title": "Settings" }
+    ]
+  },
+  "autostart": {
+    "apps": [
+      { "target": "ms-teams.exe", "workspace": 1 },
+      { "target": "msedge.exe", "args": "--app=https://teams.cloud.microsoft/ -inprivate", "delay_seconds": 1, "workspace": 1 }
     ]
   }
 }

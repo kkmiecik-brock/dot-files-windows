@@ -30,7 +30,7 @@ from oriel.tiling import geometry
 from oriel.tiling import persistence
 from oriel.tiling import policy
 from oriel.tiling import tree
-from oriel.tiling.filters import could_become_manageable, is_cloaked, is_manageable, load_ignore_rules
+from oriel.tiling.filters import could_become_manageable, get_process_name, is_cloaked, is_manageable, load_ignore_rules
 from oriel.tiling.state import DEFAULT_BORDER, DEFAULT_GAP, DEFAULT_OUTER_GAP, DEFAULT_RESIZE_STEP, DEFAULT_WORKSPACE
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,15 @@ RETRY_INTERVAL = 0.15
 # itself) flickering out and back for no user-visible reason.
 HIDE_DEBOUNCE_SECONDS = 0.2
 
+# How long a registered autostart process's expected window has to appear
+# by (see register_autostart_window/on_window_shown) - generous since MSIX
+# apps (e.g. Teams) and browser cold starts can be slow. Process name, not
+# PID - MSIX/Store app aliases (ms-teams.exe) often activate through a
+# broker process whose PID doesn't match the eventual UI process, so
+# matching by the launched exe's name is far more reliable than trying to
+# track a specific PID through that indirection.
+AUTOSTART_WINDOW_SECONDS = 30.0
+
 _state = None
 
 # hwnd -> retry count, for hwnds that failed is_manageable() at least once
@@ -66,6 +75,18 @@ _state = None
 # genuinely be too early. Cleaned up in on_window_destroyed so this can't
 # grow unbounded for windows that are never actually manageable.
 _manageable_retries = {}
+
+# process name (lowercased basename, e.g. "ms-teams.exe") -> (workspace,
+# monotonic expiry) - registered by oriel.autostart via IPC right after it
+# launches a configured app with a "workspace" override, consumed by
+# on_window_shown so ONLY that freshly-autostarted instance lands on the
+# configured workspace; manually relaunching the same app later (no fresh
+# registration) falls through to the normal current-active-workspace
+# behavior. Not one-shot - stays live for the whole window so a slow app
+# that opens more than one top-level window during its own startup (e.g. a
+# separate sign-in window) still gets all of them, expiring naturally
+# after AUTOSTART_WINDOW_SECONDS either way.
+_pending_autostart_workspace = {}
 
 # hwnd -> monotonic timestamp of its most recent hide/cloak notification,
 # for hwnds waiting out HIDE_DEBOUNCE_SECONDS before on_window_hidden's
@@ -225,6 +246,69 @@ def post(handler, *args):
     _event_queue.put((handler, args))
     if _main_thread_id is not None:
         ctypes.windll.user32.PostThreadMessageW(_main_thread_id, WM_APP_EVENT, 0, 0)
+
+
+WM_QUIT = 0x0012
+
+
+def quit_daemon(_data=None):
+    """IPC "quit" action (see tiling/daemon.py's ACTIONS) - posts WM_QUIT to
+    the message-loop thread so GetMessageW returns 0, run_message_loop's own
+    finally block unhooks everything, and the process exits naturally (all
+    background threads - IPC, border worker - are daemon threads, so none
+    of them keep the process alive once the main thread returns)."""
+    _teardown_for_quit()
+    if _main_thread_id is not None:
+        ctypes.windll.user32.PostThreadMessageW(_main_thread_id, WM_QUIT, 0, 0)
+
+
+def _teardown_for_quit():
+    """Runs once right before the process exits - undoes everything this
+    daemon did to the desktop that nothing else would ever undo once it's
+    gone: clears the focus border, shows every hidden (inactive-workspace)
+    tiled window back, and nudges any window whose current rect would now
+    sit under the taskbar (oriel.taskbar restores it as part of its own
+    "quit" teardown, racing this one - see geometry.taskbar_rect for why
+    this can't just check current taskbar visibility). Deliberately does
+    NOT re-tile or maximize anything - windows are left wherever they
+    currently are/floating, just not left invisible or obscured."""
+    global _bordered_hwnd
+    if _bordered_hwnd is not None and win32gui.IsWindow(_bordered_hwnd):
+        border.clear_border(_bordered_hwnd)
+    _bordered_hwnd = None
+
+    for monitor, workspace in _state.all_monitor_workspaces():
+        for leaf in tree.all_leaves(_state.root(monitor, workspace)):
+            hwnd = leaf.item
+            if not win32gui.IsWindow(hwnd):
+                continue
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOWNA)
+            _avoid_taskbar_overlap(hwnd, monitor)
+
+
+def _avoid_taskbar_overlap(hwnd, monitor):
+    """Shrinks/moves hwnd up out from under the taskbar's real screen rect
+    if its current bounds overlap it - used only by _teardown_for_quit."""
+    rect = geometry.safe_get_window_rect(hwnd)
+    taskbar = geometry.taskbar_rect(monitor)
+    if rect is None or taskbar is None:
+        return
+    bounds = geometry.monitor_bounds(monitor)
+    safe_left, safe_top, safe_right, safe_bottom = geometry.subtract_taskbar(bounds, taskbar)
+    left, top, right, bottom = rect
+    new_left, new_top = max(left, safe_left), max(top, safe_top)
+    new_right, new_bottom = min(right, safe_right), min(bottom, safe_bottom)
+    if (new_left, new_top, new_right, new_bottom) == (left, top, right, bottom):
+        return  # already fits, nothing to do
+    if new_right <= new_left or new_bottom <= new_top:
+        return  # window is bigger than the whole safe area - leave it alone
+    try:
+        win32gui.SetWindowPos(
+            hwnd, 0, new_left, new_top, new_right - new_left, new_bottom - new_top,
+            win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE | win32con.SWP_ASYNCWINDOWPOS,
+        )
+    except win32gui.error:
+        pass
 
 
 def _drain_posted_events():
@@ -465,6 +549,25 @@ def resync_after_display_change(_data=None):
     bootstrap_existing_windows()
 
 
+def register_autostart_window(data):
+    """Called over IPC (see tiling/daemon.py's "expect_autostart_window"
+    action) right after oriel.autostart launches a configured app with a
+    "workspace" override - see _pending_autostart_workspace for why this is
+    keyed by process name rather than PID."""
+    if not data:
+        return
+    process = data.get("process")
+    workspace = data.get("workspace")
+    if not process or workspace is None:
+        return
+    now = time.monotonic()
+    # Opportunistic cleanup - registrations only ever happen at startup, so
+    # this is the sole place expired entries get pruned.
+    for stale in [p for p, (_, expiry) in _pending_autostart_workspace.items() if expiry < now]:
+        _pending_autostart_workspace.pop(stale, None)
+    _pending_autostart_workspace[process.lower()] = (workspace, now + AUTOSTART_WINDOW_SECONDS)
+
+
 def on_window_shown(hwnd):
     _monitor, _workspace, existing = _state.find_leaf_any_monitor(hwnd)
     if existing is not None:
@@ -480,12 +583,34 @@ def on_window_shown(hwnd):
             _manageable_retries.setdefault(hwnd, 0)
         return
     _manageable_retries.pop(hwnd, None)
+    # One-off background thread, not the persistent _border_worker/queue -
+    # unlike focus changes (high-frequency, hence that whole coalescing
+    # mechanism), a window is only ever newly-shown once, so per-call
+    # thread spawn here is cheap and can't turn into a storm. Keeps this
+    # DwmSetWindowAttribute/SetWindowPos call off the message-loop thread
+    # like every other DWM call in this module (see update_focus_border's
+    # docstring for why that's a hard rule).
+    threading.Thread(target=border.ensure_rounded, args=(hwnd,), daemon=True).start()
     # Newly opened windows go to whichever monitor the cursor is on, not
     # wherever Windows happened to place the window initially.
     monitor = geometry.monitor_at_cursor()
-    workspace = _state.active_workspace(monitor)
+    active_workspace = _state.active_workspace(monitor)
+    workspace = active_workspace
+
+    pending = _pending_autostart_workspace.get(get_process_name(hwnd))
+    if pending is not None:
+        override_workspace, expiry = pending
+        if expiry >= time.monotonic() and override_workspace <= _state.workspace_count(monitor):
+            workspace = override_workspace
+
     _state.insert_hwnd(monitor, hwnd, workspace)
     _state.reflow(monitor, workspace)
+    if workspace != active_workspace and win32gui.IsWindow(hwnd):
+        # Landed on a workspace that isn't the one currently visible on this
+        # monitor - keep it out of sight until switch_workspace brings that
+        # workspace into view, same as any other tiled window not on the
+        # active workspace (see switch_workspace's own hide/show pairing).
+        win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
     _pending_repaint_nudges.add(hwnd)
     _persist_workspace_state(monitor)
     update_focus_border()
