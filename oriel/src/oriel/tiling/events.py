@@ -30,18 +30,10 @@ from oriel.tiling import geometry
 from oriel.tiling import persistence
 from oriel.tiling import policy
 from oriel.tiling import tree
-from oriel.tiling.filters import is_cloaked, is_manageable, load_ignore_rules
+from oriel.tiling.filters import could_become_manageable, is_cloaked, is_manageable, load_ignore_rules
 from oriel.tiling.state import DEFAULT_BORDER, DEFAULT_GAP, DEFAULT_OUTER_GAP, DEFAULT_RESIZE_STEP, DEFAULT_WORKSPACE
 
 logger = logging.getLogger(__name__)
-
-# How long a hwnd stays in _recently_finalized after record_drag_kind handles
-# it, so the WinEvent-driven fallback for the very same drag knows to skip
-# instead of redundantly re-processing it. Single-threading (below) removes
-# the *race* between these two paths, but both still fire for one logical
-# gesture end, so this dedup is still needed - it just no longer has to win
-# a timing race to be correct.
-RECENTLY_FINALIZED_WINDOW = 2.0
 
 # Bounded retry for the same race recheck_if_pending covers below - kept as
 # a backstop, NOT redundant with it: a window that fails is_manageable once
@@ -49,31 +41,69 @@ RECENTLY_FINALIZED_WINDOW = 2.0
 # window opens right after and steals focus, and the first settles into a
 # static position) would otherwise be missed forever. Verified this actually
 # happens live - removing this timer caused a real, reproducible miss, not
-# just a hypothetical one.
+# just a hypothetical one. Driven by one shared, message-loop-owned SetTimer
+# (see run_message_loop/_tick_manageable_retries), not a threading.Timer per
+# attempt - a burst of ephemeral windows (e.g. autocomplete popups) each
+# failing is_manageable() once used to spawn a new OS thread per retry.
 MAX_MANAGEABLE_RETRIES = 5
 RETRY_INTERVAL = 0.15
 
 _state = None
-_recently_finalized = {}
 
-# hwnds that failed is_manageable() at least once and are waiting to be
-# rechecked (see recheck_if_pending) - Firefox in particular fires
-# SHOW/NAMECHANGE before finishing its own window styling, so the very first
-# check can genuinely be too early. Cleaned up in on_window_destroyed so this
-# can't grow unbounded for windows that are never actually manageable.
-_pending_manageable_hwnds = set()
-_manageable_retry_counts = {}
-_manageable_retry_scheduled = set()
+# hwnd -> retry count, for hwnds that failed is_manageable() at least once
+# and are waiting to be rechecked (see recheck_if_pending/
+# _tick_manageable_retries) - Firefox in particular fires SHOW/NAMECHANGE
+# before finishing its own window styling, so the very first check can
+# genuinely be too early. Cleaned up in on_window_destroyed so this can't
+# grow unbounded for windows that are never actually manageable.
+_manageable_retries = {}
 
 # hwnds currently inside a bracketed EVENT_SYSTEM_MOVESIZESTART/END gesture
 # (native OS drag or drag.py's custom alt+drag - both emit this bracket) -
 # see enforce_tiled_placement, which must never fight a real gesture.
 _active_gestures = set()
 
+# hwnd -> list of monotonic timestamps of recent enforce_tiled_placement
+# reflow attempts, pruned to the last ENFORCE_WINDOW_SECONDS. Time-windowed
+# rather than a simple consecutive-mismatch counter reset on any match: an
+# app that repeatedly restores its own preferred size right after each
+# corrective reflow (confirmed live - Firefox growing back by a fixed +41px
+# every ~50-90ms, indefinitely) briefly LANDS at the correct rect right
+# after each correction, which would reset a consecutive-count-based give-up
+# back to zero forever, never actually triggering. Counting attempts within
+# a rolling time window instead can't be defeated by that alternation.
+# Cleaned up in on_window_destroyed.
+MAX_ENFORCE_ATTEMPTS = 1
+ENFORCE_WINDOW_SECONDS = 2.0
+_enforce_attempt_times = {}
+
+# hwnds that have already had their one allowed frame-margin re-validation
+# (see enforce_tiled_placement) - a brand-new window's very first
+# frame_margins() query can catch DWM before its extended frame bounds have
+# settled to their true value (confirmed live: Firefox cached a stale
+# top-margin from an early read, permanently offsetting it from its correct
+# position, since frame_margins() is cached forever otherwise). Re-query
+# EXACTLY ONCE, the first time a real mismatch is observed for this hwnd -
+# tied to an actual signal that something might be off, not a fixed delay
+# (a one-shot timer-based retry fired before DWM had actually settled).
+# Bounded to once per hwnd so this can't become the same reactive-requery-
+# during-an-active-fight loop that caused the earlier Firefox width
+# oscillation. Cleaned up in on_window_destroyed.
+_margin_revalidated = set()
+
 # hwnd currently outlined by the focus border, or None - lets LOCATIONCHANGE
 # cheaply skip re-evaluating the border for the many unrelated windows that
 # fire it, only reacting when the bordered window itself moves/resizes.
 _bordered_hwnd = None
+
+# hwnds that just got their first-ever SetWindowPos and need exactly one
+# ASYNC follow-up reposition shortly after (see _tick_repaint_nudges) - a
+# brand-new window's first paint can occasionally land before its own
+# thread has caught up with the posted resize, leaving it visually stuck
+# (observed live via screenshot: solid black rect until nudged again).
+# GlazeWM hits the identical first-move glitch and fixes it the same way:
+# issue SetWindowPos a second time, always async - never by blocking.
+_pending_repaint_nudges = set()
 
 # --- Posted-event queue (IPC thread -> message-loop thread) ------------------
 
@@ -190,7 +220,16 @@ def update_focus_border():
     tracking - enforce_tiled_placement's SetWindowPos calls (which reposition
     a tiled window back onto its tile on every focus/location change) can
     silently reset DWM's border attribute as a side effect, so trusting
-    _bordered_hwnd alone isn't reliable; re-asserting is cheap and safe."""
+    _bordered_hwnd alone isn't reliable; re-asserting is cheap and safe.
+
+    DISABLED (2026-08-18): live-isolated as a real cause of the Windows
+    Terminal freeze/spinner - DwmSetWindowAttribute is a cross-process RPC
+    to the DWM compositor, and calling it here on every focus/location
+    change compounded with a slow-starting app's own DWM/compositor work.
+    Confirmed via controlled A/B toggling (disabling this alone resolved the
+    hang; re-enabling reproduced it). Left off deliberately until a proper
+    fix is designed - not a temporary debug leftover."""
+    return
     global _bordered_hwnd
     highlight = None
     if _state.border.get("enabled", True):
@@ -296,36 +335,58 @@ def on_window_shown(hwnd):
     if existing is not None:
         return
     if not is_manageable(hwnd):
-        _pending_manageable_hwnds.add(hwnd)
-        _maybe_retry_window_shown(hwnd)
+        # Popups/tool-windows/owned-helpers (e.g. WinUI XAML popup hosts and
+        # composition bridges behind autocomplete/IME suggestion UI) never
+        # pass is_manageable() no matter how many times you check - retrying
+        # those flooded this exact path (dozens of hwnds deep) while typing.
+        # Only genuinely-initializing app windows (the Firefox timing
+        # gotcha) are worth retrying - see _tick_manageable_retries for how.
+        if could_become_manageable(hwnd):
+            _manageable_retries.setdefault(hwnd, 0)
         return
-    _pending_manageable_hwnds.discard(hwnd)
-    _manageable_retry_counts.pop(hwnd, None)
+    _manageable_retries.pop(hwnd, None)
     # Newly opened windows go to whichever monitor the cursor is on, not
     # wherever Windows happened to place the window initially.
     monitor = geometry.monitor_at_cursor()
     workspace = _state.active_workspace(monitor)
     _state.insert_hwnd(monitor, hwnd, workspace)
     _state.reflow(monitor, workspace)
+    _pending_repaint_nudges.add(hwnd)
     _persist_workspace_state(monitor)
     update_focus_border()
 
 
-def _maybe_retry_window_shown(hwnd):
-    if not win32gui.IsWindow(hwnd) or hwnd in _manageable_retry_scheduled:
-        return
-    count = _manageable_retry_counts.get(hwnd, 0)
-    if count >= MAX_MANAGEABLE_RETRIES:
-        _manageable_retry_counts.pop(hwnd, None)
-        return
-    _manageable_retry_counts[hwnd] = count + 1
-    _manageable_retry_scheduled.add(hwnd)
+def _tick_repaint_nudges():
+    """Runs on every MANAGEABLE_RETRY_TIMER tick (see run_message_loop),
+    same shared timer _tick_manageable_retries uses - no extra thread or
+    hook needed. One-shot per hwnd: fires exactly once, then removed,
+    regardless of whether a mismatch is found (this isn't drift-correction,
+    just a repaint nudge for a window that's already at the right rect)."""
+    for hwnd in list(_pending_repaint_nudges):
+        _pending_repaint_nudges.discard(hwnd)
+        monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
+        if leaf is None:
+            continue
+        _state.forget_requested_rect(hwnd)
+        _state.reflow(monitor, workspace)
 
-    def _fire():
-        _manageable_retry_scheduled.discard(hwnd)
-        post(on_window_shown, hwnd)
 
-    threading.Timer(RETRY_INTERVAL, _fire).start()
+def _tick_manageable_retries():
+    """Runs on every MANAGEABLE_RETRY_TIMER tick (see run_message_loop) -
+    one shared, message-loop-owned timer re-checking every still-pending
+    hwnd, instead of a separate threading.Timer (a whole OS thread) spawned
+    per retry attempt per hwnd. Bounded the same way as before
+    (MAX_MANAGEABLE_RETRIES) - a window that fails is_manageable once and
+    then never generates another LOCATIONCHANGE/FOREGROUND (e.g. a second
+    window opens right after and steals focus) would otherwise be missed
+    forever - verified this actually happens live, not just hypothetically."""
+    for hwnd in list(_manageable_retries):
+        count = _manageable_retries.get(hwnd, 0)
+        if not win32gui.IsWindow(hwnd) or count >= MAX_MANAGEABLE_RETRIES:
+            _manageable_retries.pop(hwnd, None)
+            continue
+        _manageable_retries[hwnd] = count + 1
+        on_window_shown(hwnd)
 
 
 def recheck_if_pending(hwnd):
@@ -335,7 +396,7 @@ def recheck_if_pending(hwnd):
     own Windows backend listens to both of these for this same reason.
     Only acts on hwnds already known-pending (already failed is_manageable
     at least once), so this adds no cost to window activity in general."""
-    if hwnd in _pending_manageable_hwnds:
+    if hwnd in _manageable_retries:
         on_window_shown(hwnd)
 
 
@@ -356,42 +417,77 @@ def enforce_tiled_placement(hwnd):
     if _state.fullscreen_leaf(monitor, workspace) is leaf:
         return
     if geometry.monitor_of(hwnd) != monitor:
+        _state.forget_requested_rect(hwnd)
         _state.reflow(monitor, workspace)
         return
     expected = _state.compute_rects(monitor, workspace).get(leaf)
     if expected is None:
         return
     expected = geometry.expand_rect_for_frame(expected, hwnd)
-    try:
-        actual = win32gui.GetWindowRect(hwnd)
-    except win32gui.error:
+    actual = geometry.safe_get_window_rect(hwnd)
+    if actual is None:
         return
     if actual == expected:
         return
-    actual_w, actual_h = actual[2] - actual[0], actual[3] - actual[1]
-    expected_w, expected_h = expected[2] - expected[0], expected[3] - expected[1]
-    if actual_w > expected_w or actual_h > expected_h:
-        # Clamped bigger than requested - an enforced minimum size. If this
-        # doesn't teach us anything new, reflowing again would only ask for
-        # the exact same impossible size and get clamped the exact same
-        # way - stop here instead of fighting forever (task 13).
-        if not geometry.learn_min_size(hwnd, actual_w, actual_h):
-            return
+    if hwnd not in _margin_revalidated:
+        # Give a stale-from-too-early frame margin ONE free re-check before
+        # counting this mismatch against the fight budget below - re-derive
+        # it now that a real event proves the window still isn't where
+        # expected, then immediately reflow with the freshly-queried value.
+        # Bounded to once per hwnd (not tied to further mismatches), so this
+        # can't turn back into the earlier reactive-requery-during-an-
+        # active-fight loop that caused the Firefox width oscillation.
+        _margin_revalidated.add(hwnd)
+        geometry.invalidate_frame_margins(hwnd)
+        _state.forget_requested_rect(hwnd)
+        _state.reflow(monitor, workspace)
+        return
+    # Time-windowed, not a simple consecutive-mismatch counter reset on any
+    # match - some apps (confirmed live: Firefox, growing back by a fixed
+    # +41px every ~50-90ms) restore their own preferred size right after
+    # every corrective reflow, landing at the correct rect just long enough
+    # for the NEXT check to see a match before drifting away again - a
+    # consecutive-count-based give-up gets reset by that alternation and
+    # can never actually trigger, fighting forever. Counting attempts
+    # within a rolling window instead can't be defeated by that pattern.
+    now = time.monotonic()
+    attempts = [t for t in _enforce_attempt_times.get(hwnd, []) if now - t < ENFORCE_WINDOW_SECONDS]
+    if len(attempts) >= MAX_ENFORCE_ATTEMPTS:
+        # Some apps just won't shrink to their computed tiled share (no
+        # attempt is made to detect or query a "real" minimum - see tree.py,
+        # matches GlazeWM's approach of not modeling this at all) - stop
+        # reactively re-fighting this hwnd once it's clearly not converging.
+        # A genuine future layout change still gets a fresh attempt, since
+        # that goes through reflow() directly rather than through this list.
+        _enforce_attempt_times[hwnd] = attempts
+        return
+    attempts.append(now)
+    _enforce_attempt_times[hwnd] = attempts
+    _state.forget_requested_rect(hwnd)
     _state.reflow(monitor, workspace)
 
 
-def on_window_destroyed(hwnd):
-    _pending_manageable_hwnds.discard(hwnd)
-    _manageable_retry_counts.pop(hwnd, None)
-    _active_gestures.discard(hwnd)
-    monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
-    if leaf is None:
-        return
+def _unmanage(monitor, workspace, leaf):
+    """Shared tail of on_window_destroyed/on_window_hidden - both remove a
+    leaf from the tree the same way, once their own (different) entry
+    guards decide the window is really gone/hidden for good."""
     _state.remove_leaf(monitor, leaf, workspace)
     _state.reflow(monitor, workspace)
     _persist_workspace_state(monitor)
-    if hwnd == _bordered_hwnd:
+    if leaf.item == _bordered_hwnd:
         update_focus_border()
+
+
+def on_window_destroyed(hwnd):
+    _manageable_retries.pop(hwnd, None)
+    _active_gestures.discard(hwnd)
+    _enforce_attempt_times.pop(hwnd, None)
+    _pending_repaint_nudges.discard(hwnd)
+    _margin_revalidated.discard(hwnd)
+    monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
+    if leaf is None:
+        return
+    _unmanage(monitor, workspace, leaf)
 
 
 def on_window_hidden(hwnd):
@@ -411,11 +507,7 @@ def on_window_hidden(hwnd):
         return
     if workspace != _state.active_workspace(monitor):
         return  # hidden because its workspace isn't active right now - our own switch-away, not a real hide
-    _state.remove_leaf(monitor, leaf, workspace)
-    _state.reflow(monitor, workspace)
-    _persist_workspace_state(monitor)
-    if hwnd == _bordered_hwnd:
-        update_focus_border()
+    _unmanage(monitor, workspace, leaf)
 
 
 # --- Focus / move / resize hotkey commands ------------------------------------
@@ -425,15 +517,34 @@ def _force_foreground(target_hwnd):
     restriction) when called from a background process that didn't itself
     receive the triggering input - exactly this daemon's situation, since
     hotkeyd receives the real keypress and forwards it over IPC. Same
-    AttachThreadInput trick drag.py's _force_foreground already proved."""
+    AttachThreadInput trick drag.py's _force_foreground already proved.
+    CRITICAL: every AttachThreadInput(..., True) must be matched by a
+    (..., False) no matter what happens in between - a stuck attachment
+    permanently cross-wires the OTHER thread's keyboard input to this
+    daemon's thread, which looks like (and is) a real input freeze for
+    whatever app was attached. Nothing between an attach and its matching
+    detach may be allowed to raise past this function uncaught."""
     current_thread = win32api.GetCurrentThreadId()
-    fg_hwnd = win32gui.GetForegroundWindow()
-    fg_thread = win32process.GetWindowThreadProcessId(fg_hwnd)[0] if fg_hwnd else 0
-    target_thread = win32process.GetWindowThreadProcessId(target_hwnd)[0]
-
-    attached_fg = fg_thread and fg_thread != current_thread and win32process.AttachThreadInput(current_thread, fg_thread, True)
-    attached_target = target_thread and target_thread != current_thread and win32process.AttachThreadInput(current_thread, target_thread, True)
+    attached_fg = attached_target = False
+    fg_thread = target_thread = 0
     try:
+        fg_hwnd = win32gui.GetForegroundWindow()
+        fg_thread = win32process.GetWindowThreadProcessId(fg_hwnd)[0] if fg_hwnd else 0
+        target_thread = win32process.GetWindowThreadProcessId(target_hwnd)[0]
+
+        if fg_thread and fg_thread != current_thread:
+            # AttachThreadInput returns None on success (pywin32 convention
+            # for void-return Win32 calls) and raises on failure - it does
+            # NOT return a truthy success flag. Treating its return value
+            # as the success indicator (as this used to) meant `attached_fg`
+            # was always None/falsy even on success, so the finally block's
+            # `if attached_fg:` never detached - leaking every attach.
+            win32process.AttachThreadInput(current_thread, fg_thread, True)
+            attached_fg = True
+        if target_thread and target_thread != current_thread:
+            win32process.AttachThreadInput(current_thread, target_thread, True)
+            attached_target = True
+
         win32gui.BringWindowToTop(target_hwnd)
         win32gui.SetForegroundWindow(target_hwnd)
     except win32gui.error:
@@ -603,9 +714,8 @@ def finalize_move_resize(hwnd, kind):
     if leaf is None or _state.fullscreen_leaf(monitor, workspace) is leaf:
         return
 
-    try:
-        raw = win32gui.GetWindowRect(hwnd)
-    except Exception:
+    raw = geometry.safe_get_window_rect(hwnd)
+    if raw is None:
         _state.reflow(monitor, workspace)
         return
     actual = geometry.shrink_rect_for_frame(raw, hwnd)
@@ -631,21 +741,23 @@ def finalize_move_resize(hwnd, kind):
         outcome = policy.decide_resize(leaf, actual, expected, all_rects, _state.inner_gap)
 
     dirty = _state.apply_outcome(monitor, leaf, outcome, workspace)
+    # A NoOp outcome (dropped on empty space, not onto another tile) leaves
+    # the tree - and therefore the leaf's computed target rect - completely
+    # unchanged, but the window's REAL on-screen position is now wherever it
+    # was physically dropped. reflow()'s skip-if-unchanged cache only knows
+    # about the target rect, so it would otherwise treat this as "nothing to
+    # do" and never re-issue the SetWindowPos that snaps it back.
+    _state.forget_requested_rect(hwnd)
     for dirty_monitor, dirty_workspace in dirty:
         _state.reflow(dirty_monitor, dirty_workspace)
 
 
 def on_move_resize_end(hwnd):
-    """WinEvent-driven fallback path - only actually runs the finalize logic
-    for gestures that weren't already handled by record_drag_kind (i.e.
-    native OS drags that never went through the drag module). Skips if this
-    hwnd was just finalized via IPC, since that path is authoritative and
-    (before single-threading this) racing it against this WinEvent made
-    behavior nondeterministic."""
+    """WinEvent-driven path for native OS drags (dragging a title bar
+    directly) - drag.py's own alt+drag gestures never reach here at all,
+    since it no longer fires a synthetic MOVESIZEEND (see its _end_drag
+    docstring); record_drag_kind is the sole, authoritative path for those."""
     _active_gestures.discard(hwnd)
-    finalized_at = _recently_finalized.pop(hwnd, None)
-    if finalized_at is not None and time.monotonic() - finalized_at < RECENTLY_FINALIZED_WINDOW:
-        return
     finalize_move_resize(hwnd, None)
 
 
@@ -667,7 +779,6 @@ def record_drag_kind(data):
     hwnd = int(hwnd)
     _active_gestures.discard(hwnd)
     finalize_move_resize(hwnd, kind)
-    _recently_finalized[hwnd] = time.monotonic()
 
 
 # --- WinEventHook wiring -------------------------------------------------------
@@ -704,6 +815,11 @@ user32.SetWinEventHook.argtypes = [
     wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
 ]
 user32.UnhookWinEvent.argtypes = [wintypes.HANDLE]
+
+WM_TIMER = 0x0113
+user32.SetTimer.restype = wintypes.UINT
+user32.SetTimer.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.UINT, ctypes.c_void_p]
+user32.KillTimer.argtypes = [wintypes.HWND, wintypes.UINT]
 
 
 def _win_event_proc(hWinEventHook, event, hwnd, idObject, idChild, idEventThread, dwmsEventTime):
@@ -774,6 +890,10 @@ def run_message_loop():
     hook_uncloaked = user32.SetWinEventHook(
         EVENT_OBJECT_UNCLOAKED, EVENT_OBJECT_UNCLOAKED, None, win_event_proc, 0, 0, WINEVENT_OUTOFCONTEXT
     )
+    # hWnd=None posts WM_TIMER to this (the calling) thread's own message
+    # queue instead of any window - the loop below picks it up like any
+    # other message, no extra thread needed for the retry backstop.
+    manageable_retry_timer_id = user32.SetTimer(None, 0, int(RETRY_INTERVAL * 1000), None)
 
     try:
         msg = wintypes.MSG()
@@ -781,9 +901,15 @@ def run_message_loop():
             if msg.message == WM_APP_EVENT:
                 _drain_posted_events()
                 continue
+            if msg.message == WM_TIMER and msg.wParam == manageable_retry_timer_id:
+                _tick_manageable_retries()
+                _tick_repaint_nudges()
+                continue
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
     finally:
+        if manageable_retry_timer_id:
+            user32.KillTimer(None, manageable_retry_timer_id)
         if hook_show:
             user32.UnhookWinEvent(hook_show)
         if hook_destroy:

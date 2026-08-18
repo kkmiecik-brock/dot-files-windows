@@ -20,6 +20,32 @@ class _RECT(ctypes.Structure):
                 ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
 
+def safe_get_window_rect(hwnd):
+    """GetWindowRect, or None if hwnd is gone/invalid by the time it's called
+    - single place for a failure mode every caller needs to handle anyway."""
+    try:
+        return win32gui.GetWindowRect(hwnd)
+    except win32gui.error:
+        return None
+
+
+def safe_get_class_name(hwnd):
+    """GetClassName, or "" on failure (see safe_get_window_rect) - "" rather
+    than None since callers generally compare/lower() this as a string."""
+    try:
+        return win32gui.GetClassName(hwnd)
+    except win32gui.error:
+        return ""
+
+
+def safe_get_window_text(hwnd):
+    """GetWindowText, or "" on failure (see safe_get_class_name)."""
+    try:
+        return win32gui.GetWindowText(hwnd)
+    except win32gui.error:
+        return ""
+
+
 # hwnd -> (left, top, right, bottom) margins. A window's invisible DWM
 # resize/shadow border is effectively constant for its lifetime and costs a
 # DWM round-trip to query, unlike its rect/iconic-state which genuinely can
@@ -126,10 +152,7 @@ def _find_taskbar_hwnd(monitor):
     found = []
 
     def callback(hwnd, _):
-        try:
-            class_name = win32gui.GetClassName(hwnd)
-        except win32gui.error:
-            return True
+        class_name = safe_get_class_name(hwnd)
         if class_name in TASKBAR_CLASSES:
             found.append(hwnd)
         return True
@@ -205,10 +228,10 @@ def _query_frame_margins(hwnd):
     windows (looking ~2x too big) while outer gaps only get it once.
     Returns (left, top, right, bottom) margins to expand a target rect by
     so the *visible* frame lands exactly on that rect."""
-    try:
-        al, at, ar, ab = win32gui.GetWindowRect(hwnd)
-    except win32gui.error:
+    rect = safe_get_window_rect(hwnd)
+    if rect is None:
         return (0, 0, 0, 0)
+    al, at, ar, ab = rect
 
     frame = _RECT()
     hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
@@ -236,34 +259,6 @@ def frame_margins(hwnd):
 
 def invalidate_frame_margins(hwnd):
     _frame_margin_cache.pop(hwnd, None)
-
-
-# hwnd -> (min_width, min_height), in the same frame-inclusive coordinate
-# space as GetWindowRect/SetWindowPos. Learned reactively from an actual
-# observed resize clamp (see state.py's reflow) rather than queried
-# speculatively via WM_GETMINMAXINFO - most windows have no real floor
-# worth tracking, so this only grows for the ones that actually enforce one.
-_min_size_cache = {}
-
-
-def learn_min_size(hwnd, width, height):
-    """Records/grows hwnd's observed minimum size. Returns True if this
-    changes what was already known, so a caller can trigger a re-layout
-    only when there's actually new information."""
-    existing = _min_size_cache.get(hwnd, (0, 0))
-    updated = (max(existing[0], width), max(existing[1], height))
-    if updated != existing:
-        _min_size_cache[hwnd] = updated
-        return True
-    return False
-
-
-def min_size(hwnd):
-    return _min_size_cache.get(hwnd, (0, 0))
-
-
-def invalidate_min_size(hwnd):
-    _min_size_cache.pop(hwnd, None)
 
 
 def expand_rect_for_frame(rect, hwnd):

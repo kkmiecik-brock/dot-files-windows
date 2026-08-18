@@ -29,12 +29,20 @@ def _force_frame_redraw(hwnd):
     # if it doesn't detect the attribute change as needing one - reliably
     # observed re-applying the SAME color after clear_border() silently not
     # re-appearing on refocus otherwise. SWP_FRAMECHANGED forces DWM to
-    # actually recompute/repaint the frame.
-    win32gui.SetWindowPos(
-        hwnd, 0, 0, 0, 0, 0,
-        win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOZORDER
-        | win32con.SWP_NOACTIVATE | win32con.SWP_FRAMECHANGED,
-    )
+    # actually recompute/repaint the frame. Skip entirely for an already-
+    # hidden window - Windows rejects this SetWindowPos combination on one
+    # (observed: ERROR_INVALID_PARAMETER when clearing a border right after
+    # workspace-switch hides the window) and there's nothing to redraw anyway.
+    if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
+        return
+    try:
+        win32gui.SetWindowPos(
+            hwnd, 0, 0, 0, 0, 0,
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOZORDER
+            | win32con.SWP_NOACTIVATE | win32con.SWP_FRAMECHANGED | win32con.SWP_ASYNCWINDOWPOS,
+        )
+    except win32gui.error:
+        pass
 
 
 def set_border(hwnd, colorref, corner_style):

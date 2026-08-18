@@ -1,9 +1,12 @@
 """Alt+drag move/resize for any window.
 
 Alt+Left-drag moves the window under the cursor; Alt+Right-drag resizes it.
-Fires the native interactive-move/resize accessibility events via
-NotifyWinEvent so any listening window manager can treat it as a genuine
-drag and snap/re-tile it on release - the same technique AltSnap uses.
+Fires the native interactive-move/resize-START accessibility event via
+NotifyWinEvent so any listening window manager knows a real gesture is in
+progress and shouldn't fight it - the same technique AltSnap uses. The end
+of the gesture is reported directly over IPC (record_drag_kind) instead of
+a matching synthetic END event, since this module already knows the
+authoritative outcome and a synthetic END would just race that same report.
 
 Movement is driven by a polling loop (GetCursorPos + SetWindowPos on a tight
 sleep interval), mirroring the AHK implementation this replaces. Both a
@@ -39,12 +42,12 @@ WM_RBUTTONUP = 0x0205
 GA_ROOT = 2
 
 EVENT_SYSTEM_MOVESIZESTART = 0x000A
-EVENT_SYSTEM_MOVESIZEEND = 0x000B
 
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
+SWP_ASYNCWINDOWPOS = 0x4000
 
 # VK codes to check via GetAsyncKeyState for each configurable modifier name.
 # win checks both L/R since GetAsyncKeyState has no combined VK for it.
@@ -117,14 +120,34 @@ def _force_foreground(target_hwnd):
     # process due to Windows' foreground-lock restriction. Temporarily
     # attaching our input queue to both the current foreground window's
     # thread and the target's thread bypasses that restriction reliably.
+    # CRITICAL: every AttachThreadInput(..., True) must be matched by a
+    # (..., False) no matter what happens in between - a stuck attachment
+    # permanently cross-wires the OTHER thread's keyboard input to this
+    # daemon's thread, which looks like (and is) a real input freeze for
+    # whatever app was attached. Everything from the first attach onward
+    # must be inside the try, so an exception partway through (e.g.
+    # target_hwnd having gone stale) still reaches the matching detach.
     current_thread = win32api.GetCurrentThreadId()
-    fg_hwnd = win32gui.GetForegroundWindow()
-    fg_thread = win32process.GetWindowThreadProcessId(fg_hwnd)[0] if fg_hwnd else 0
-    target_thread = win32process.GetWindowThreadProcessId(target_hwnd)[0]
-
-    attached_fg = fg_thread and fg_thread != current_thread and win32process.AttachThreadInput(current_thread, fg_thread, True)
-    attached_target = target_thread and target_thread != current_thread and win32process.AttachThreadInput(current_thread, target_thread, True)
+    attached_fg = attached_target = False
+    fg_thread = target_thread = 0
     try:
+        fg_hwnd = win32gui.GetForegroundWindow()
+        fg_thread = win32process.GetWindowThreadProcessId(fg_hwnd)[0] if fg_hwnd else 0
+        target_thread = win32process.GetWindowThreadProcessId(target_hwnd)[0]
+
+        if fg_thread and fg_thread != current_thread:
+            # AttachThreadInput returns None on success (pywin32 convention
+            # for void-return Win32 calls) and raises on failure - it is
+            # NOT a truthy success flag. Using its return value directly as
+            # the success indicator (as this used to) meant `attached_fg`
+            # was always None/falsy even on success, so the finally block's
+            # `if attached_fg:` never detached - leaking every attach.
+            win32process.AttachThreadInput(current_thread, fg_thread, True)
+            attached_fg = True
+        if target_thread and target_thread != current_thread:
+            win32process.AttachThreadInput(current_thread, target_thread, True)
+            attached_target = True
+
         win32gui.BringWindowToTop(target_hwnd)
         win32gui.SetForegroundWindow(target_hwnd)
     except win32gui.error:
@@ -186,7 +209,7 @@ def _update_drag(x, y):
     if drag_button == "move":
         win32gui.SetWindowPos(
             hwnd, 0, win_x + dx, win_y + dy, 0, 0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         )
     else:
         min_size = settings["min_size"]
@@ -207,7 +230,7 @@ def _update_drag(x, y):
 
         win32gui.SetWindowPos(
             hwnd, 0, new_left, new_top, new_w, new_h,
-            SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         )
 
 
@@ -215,9 +238,12 @@ def _end_drag():
     global dragging
     # Tiling can't observe which button drove this gesture (GetAsyncKeyState
     # can't see it - see _drag_loop's comment), so tell it directly instead
-    # of leaving it to guess from the resulting size/position delta.
+    # of leaving it to guess from the resulting size/position delta. No
+    # synthetic MOVESIZEEND here (unlike the START above) - that used to
+    # race this same IPC message for the same gesture, needing a dedup
+    # timer on the tiling side; record_drag_kind alone is authoritative for
+    # every gesture this module drives.
     send_action("tiling", "record_drag_kind", {"hwnd": hwnd, "kind": drag_button})
-    user32.NotifyWinEvent(EVENT_SYSTEM_MOVESIZEEND, hwnd, 0, 0)
     dragging = False
 
 

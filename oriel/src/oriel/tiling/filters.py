@@ -27,6 +27,7 @@ import win32gui
 import win32process
 
 from oriel.config import get_section
+from oriel.tiling import geometry
 
 _user32 = ctypes.windll.user32
 _user32.GetAncestor.restype = ctypes.wintypes.HWND
@@ -103,20 +104,6 @@ def _is_ignored(process_name, class_name, title):
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 
-def _get_window_text(hwnd):
-    try:
-        return win32gui.GetWindowText(hwnd)
-    except win32gui.error:
-        return ""
-
-
-def _get_class_name(hwnd):
-    try:
-        return win32gui.GetClassName(hwnd)
-    except win32gui.error:
-        return ""
-
-
 def _get_process_name(hwnd):
     try:
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
@@ -132,6 +119,36 @@ def _get_process_name(hwnd):
 
 
 def is_manageable(hwnd):
+    if not _passes_structural_gate(hwnd):
+        return False
+    style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+    if not (style & win32con.WS_CAPTION):
+        return False
+    # Require at least one "real app" chrome element; WS_SYSMENU is intentionally
+    # excluded because Electron apps (VS Code, etc.) don't set it.
+    APP_CHROME = win32con.WS_MINIMIZEBOX | win32con.WS_MAXIMIZEBOX | win32con.WS_THICKFRAME
+    if not (style & APP_CHROME):
+        return False
+
+    title = geometry.safe_get_window_text(hwnd)
+    if not title:
+        return False
+
+    class_name = geometry.safe_get_class_name(hwnd)
+    process_name = _get_process_name(hwnd)
+    if _is_ignored(process_name, class_name, title):
+        return False
+
+    return True
+
+
+def _passes_structural_gate(hwnd):
+    """The properties checked here describe what KIND of window this
+    fundamentally is - a popup/tool-window/owned-helper never becomes a
+    real app window no matter how long you wait, unlike WS_CAPTION/chrome/
+    title (checked in is_manageable, not here), which a genuinely-
+    initializing app window can still gain moments after first appearing
+    (the Firefox timing gotcha the retry logic below exists for)."""
     if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
         return False
     if is_cloaked(hwnd):
@@ -144,22 +161,18 @@ def is_manageable(hwnd):
     # Owned windows (popups, helpers, overlays) excluded unless WS_EX_APPWINDOW
     if not app_window and _get_root_owner(hwnd) != hwnd:
         return False
-    style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
-    if not (style & win32con.WS_CAPTION):
-        return False
-    # Require at least one "real app" chrome element; WS_SYSMENU is intentionally
-    # excluded because Electron apps (VS Code, etc.) don't set it.
-    APP_CHROME = win32con.WS_MINIMIZEBOX | win32con.WS_MAXIMIZEBOX | win32con.WS_THICKFRAME
-    if not (style & APP_CHROME):
-        return False
-
-    title = _get_window_text(hwnd)
-    if not title:
-        return False
-
-    class_name = _get_class_name(hwnd)
-    process_name = _get_process_name(hwnd)
-    if _is_ignored(process_name, class_name, title):
-        return False
-
     return True
+
+
+def could_become_manageable(hwnd):
+    """Whether it's worth retrying is_manageable() later for this hwnd - a
+    real app window that hasn't finished applying its own chrome/title yet
+    still might pass on a later check, but a window that's structurally a
+    popup/tool-window/owned-helper (e.g. WinUI/XAML popup hosts and
+    composition bridges used for autocomplete/IME-suggestion UI - observed
+    live flooding this exact retry path, dozens of hwnds deep, while typing)
+    never will - retrying those is pure wasted work: a threading.Timer
+    thread and a posted event per attempt, for something that can never
+    succeed. Checked separately from is_manageable() so callers can skip
+    scheduling a retry entirely for this class of window."""
+    return _passes_structural_gate(hwnd)

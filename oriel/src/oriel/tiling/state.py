@@ -24,13 +24,6 @@ DEFAULT_OUTER_GAP = {"top": 0, "right": 0, "bottom": 0, "left": 0}
 DEFAULT_RESIZE_STEP = 0.05
 DEFAULT_BORDER = {"enabled": True, "color": "#cba6f7", "corner_style": "rounded"}
 
-# How many consecutive "learned a bigger minimum, try again" passes reflow()
-# allows within one triggering event, before accepting the current
-# (possibly overflowing) layout instead of continuing to renegotiate - see
-# reflow(). Mirrors this codebase's existing bounded-retry pattern
-# (MAX_MANAGEABLE_RETRIES in events.py) rather than retrying unboundedly.
-MAX_MIN_SIZE_LEARN_PASSES = 5
-
 
 class TilingState:
     def __init__(self):
@@ -38,6 +31,14 @@ class TilingState:
         self._focused_leaf = {}
         self._fullscreen_leaf = {}
         self._active_workspace = {}
+        # hwnd -> last (left, top, right, bottom) actually requested via
+        # SetWindowPos, frame-expanded - lets reflow() skip re-issuing an
+        # identical request to a leaf nothing changed for, instead of
+        # unconditionally repositioning every window on every call (which
+        # was generating a real LOCATIONCHANGE per untouched sibling on
+        # every single reflow, each one re-triggering enforce_tiled_
+        # placement's own mismatch check - a needless cascade amplifier).
+        self._last_requested_rect = {}
         self.inner_gap = DEFAULT_GAP
         self.outer_gap = DEFAULT_OUTER_GAP
         self.resize_step = DEFAULT_RESIZE_STEP
@@ -54,6 +55,7 @@ class TilingState:
         self._focused_leaf = {}
         self._fullscreen_leaf = {}
         self._active_workspace = {}
+        self._last_requested_rect = {}
 
     @staticmethod
     def _key(monitor, workspace=DEFAULT_WORKSPACE):
@@ -124,8 +126,7 @@ class TilingState:
 
     def compute_rects(self, monitor, workspace=DEFAULT_WORKSPACE):
         root = self.root(monitor, workspace)
-        min_sizes = {leaf.item: geometry.min_size(leaf.item) for leaf in tree.all_leaves(root)}
-        return tree.compute_rects(root, self.work_area(monitor), self.inner_gap, min_sizes)
+        return tree.compute_rects(root, self.work_area(monitor), self.inner_gap)
 
     def insert_hwnd(self, monitor, hwnd, workspace=DEFAULT_WORKSPACE):
         target = self.focused_leaf(monitor, workspace)
@@ -142,7 +143,7 @@ class TilingState:
         if self.fullscreen_leaf(monitor, workspace) is leaf:
             self.clear_fullscreen_leaf(monitor, workspace)
         geometry.invalidate_frame_margins(leaf.item)
-        geometry.invalidate_min_size(leaf.item)
+        self._last_requested_rect.pop(leaf.item, None)
 
     def find_leaf_any_monitor(self, hwnd):
         """Returns (monitor, workspace, leaf), or (None, None, None)."""
@@ -151,6 +152,18 @@ class TilingState:
             if leaf is not None:
                 return monitor, workspace, leaf
         return None, None, None
+
+    def forget_requested_rect(self, hwnd):
+        """Forces the next reflow() to re-issue SetWindowPos for hwnd even
+        if its computed target rect hasn't changed - for when the window's
+        ACTUAL position drifted from what was last requested (app moved
+        itself, restored a remembered position, etc). Without this,
+        reflow()'s dedup would see an unchanged target and wrongly assume
+        there's nothing to re-assert. Purely a "skip if unchanged" cache -
+        reflow() no longer branches sync/async on this, so popping it here
+        can no longer affect blocking behavior, only whether a redundant
+        SetWindowPos gets skipped."""
+        self._last_requested_rect.pop(hwnd, None)
 
     def hwnd_workspaces(self, monitor):
         """{hwnd: workspace} for every hwnd currently tiled anywhere on
@@ -163,40 +176,64 @@ class TilingState:
                 result[leaf.item] = workspace
         return result
 
-    def reflow(self, monitor, workspace=DEFAULT_WORKSPACE, _min_size_pass=0):
+    def reflow(self, monitor, workspace=DEFAULT_WORKSPACE):
         rects = self.compute_rects(monitor, workspace)
 
         fullscreen_leaf = self.fullscreen_leaf(monitor, workspace)
         if fullscreen_leaf is not None:
             rects[fullscreen_leaf] = geometry.monitor_bounds(monitor)
 
-        learned_new_minimum = False
         for leaf, rect in rects.items():
             if not win32gui.IsWindow(leaf.item) or win32gui.IsIconic(leaf.item):
                 continue
             left, top, right, bottom = geometry.expand_rect_for_frame(rect, leaf.item)
-            win32gui.SetWindowPos(
-                leaf.item, 0, left, top, right - left, bottom - top,
-                win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE,
+            requested = (left, top, right, bottom)
+            if self._last_requested_rect.get(leaf.item) == requested:
+                continue  # nothing changed for this leaf - don't re-broadcast a position it's already at
+            # SWP_ASYNCWINDOWPOS: without it, SetWindowPos blocks this
+            # thread until the TARGET window's own thread processes the
+            # request - if that app is busy or still starting up (e.g.
+            # mid-keystroke, or a WinUI/XAML app like Windows Terminal still
+            # doing heavy startup layout work), this single-threaded
+            # daemon's whole message loop stalls with it, unable to reach
+            # ANYTHING else queued (hotkeys, IPC, other windows' events)
+            # until the target becomes responsive again. Confirmed live
+            # twice now: a workspace-switch hotkey stalled 4+ seconds while
+            # typing in VS Code, and a synchronous first-positioning call
+            # (a since-removed exception that used to live here) compounded
+            # into a sustained multi-second freeze against a slow-starting
+            # Windows Terminal window. ALWAYS async, no exceptions - GlazeWM's
+            # own SetWindowPos wrapper (native_window.rs) does the same,
+            # unconditionally, for every call, new window or not.
+            #
+            # A brand-new window's first paint can still occasionally land
+            # before its own thread has caught up with this posted resize
+            # (observed live via screenshot: solid black rect until nudged
+            # again) - handled by a one-shot ASYNC follow-up reposition in
+            # events.py's _tick_repaint_nudges, not by ever blocking here.
+            # GlazeWM hits the same first-move glitch (their own comment:
+            # "the window might be sized incorrectly after the first move")
+            # and fixes it the same way: call SetWindowPos again, still async.
+            flags = (
+                win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE
+                | win32con.SWP_FRAMECHANGED | win32con.SWP_ASYNCWINDOWPOS
             )
-            if leaf is fullscreen_leaf:
-                continue  # fullscreen intentionally ignores tile minimums
             try:
-                actual_left, actual_top, actual_right, actual_bottom = win32gui.GetWindowRect(leaf.item)
-            except win32gui.error:
-                continue
-            actual_w, actual_h = actual_right - actual_left, actual_bottom - actual_top
-            requested_w, requested_h = right - left, bottom - top
-            if actual_w > requested_w or actual_h > requested_h:
-                # The window refused to shrink to what was asked - it has an
-                # enforced minimum size. Remember it so the next layout pass
-                # gives it (and only it) that floor instead of fighting
-                # forever over the same impossible request (task 13).
-                if geometry.learn_min_size(leaf.item, actual_w, actual_h):
-                    learned_new_minimum = True
-
-        if learned_new_minimum and _min_size_pass < MAX_MIN_SIZE_LEARN_PASSES:
-            self.reflow(monitor, workspace, _min_size_pass + 1)
+                win32gui.SetWindowPos(leaf.item, 0, left, top, right - left, bottom - top, flags)
+            except win32gui.error as exc:
+                # ERROR_ACCESS_DENIED (5): the OS transiently rejects
+                # SetWindowPos while the target window is mid-transition
+                # (e.g. being shown/restored) - not a bug, and the window
+                # will get another LOCATIONCHANGE/FOREGROUND event of its
+                # own once the transition finishes, which naturally retries
+                # this. Letting it propagate would cost a full traceback
+                # format+disk-write per occurrence on this single thread -
+                # observed live flooding to dozens within a second while
+                # switching back to a window mid-show.
+                if exc.winerror == 5:
+                    continue
+                raise
+            self._last_requested_rect[leaf.item] = requested
 
     def reflow_all(self):
         for monitor, workspace in list(self._roots):

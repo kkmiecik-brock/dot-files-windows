@@ -66,19 +66,13 @@ def all_leaves(node):
     return leaves
 
 
-def compute_rects(node, rect, gap, min_sizes=None, out=None):
+def compute_rects(node, rect, gap, out=None):
     """Recursively computes each leaf's rect within `rect`, honoring `gap`
     between every adjacent pair of siblings. Returns a dict leaf -> rect.
-
-    `min_sizes` is an optional {item: (min_width, min_height)} dict (see
-    events.enforce_tiled_placement/geometry.learn_min_size - populated from
-    an actually-observed OS/app resize clamp, not queried speculatively).
-    When present, no child is shrunk below its own subtree's minimum along
-    the split axis as long as a sibling has slack to give up; if every
-    child's minimum together still doesn't fit `rect`, sizes simply don't
-    sum to `available` - an honestly-unsatisfiable layout, not hidden."""
-    if min_sizes is None:
-        min_sizes = {}
+    Pure ratio-based split - no attempt to detect or respect a window's
+    own enforced minimum size (matches GlazeWM's approach: if a particular
+    app refuses to shrink to its computed share, that's between it and the
+    OS, not something the tree tries to model or compensate for)."""
     if out is None:
         out = {}
     if node is None:
@@ -91,11 +85,9 @@ def compute_rects(node, rect, gap, min_sizes=None, out=None):
     n = len(node.children)
     total_gap = gap * (n - 1)
     horizontal = node.orientation == "horizontal"
-    axis = "horizontal" if horizontal else "vertical"
     available = (right - left if horizontal else bottom - top) - total_gap
 
-    minimums = [_subtree_min(child, axis, gap, min_sizes) for child in node.children]
-    sizes = _distribute_sizes(available, node.ratios, minimums)
+    sizes = _distribute_sizes(available, node.ratios)
 
     pos = left if horizontal else top
     for child, size in zip(node.children, sizes):
@@ -103,62 +95,21 @@ def compute_rects(node, rect, gap, min_sizes=None, out=None):
             child_rect = (pos, top, pos + size, bottom)
         else:
             child_rect = (left, pos, right, pos + size)
-        compute_rects(child, child_rect, gap, min_sizes, out)
+        compute_rects(child, child_rect, gap, out)
         pos += size + gap
 
     return out
 
 
-def _subtree_min(node, axis, gap, min_sizes):
-    """Minimum pixel size this subtree needs along `axis` ("horizontal" or
-    "vertical") - a Leaf's own known minimum, or for a Container: summed
-    (plus gaps) if it splits along `axis`, else the max of its children's
-    minimums (they're stacked on the cross axis, so each already gets the
-    container's full span there)."""
-    if node is None:
-        return 0
-    if isinstance(node, Leaf):
-        width, height = min_sizes.get(node.item, (0, 0))
-        return width if axis == "horizontal" else height
-    child_mins = [_subtree_min(child, axis, gap, min_sizes) for child in node.children]
-    if not child_mins:
-        return 0
-    if node.orientation == axis:
-        return sum(child_mins) + gap * (len(child_mins) - 1)
-    return max(child_mins)
-
-
-def _distribute_sizes(available, ratios, minimums):
-    """Converts per-child ratios into integer pixel sizes. If every child's
-    ratio share already meets its minimum, this is byte-identical to the
-    old plain ratio*available split (dead-pixel-free at the far edge).
-    Otherwise, space is borrowed from children with slack (share above
-    their own minimum) to raise deficient children up to theirs - if that
-    still isn't enough to cover everyone's floor, sizes simply don't sum
-    to `available` (an overflowing, honestly-unsatisfiable layout) rather
-    than something to keep renegotiating forever."""
+def _distribute_sizes(available, ratios):
+    """Converts per-child ratios into integer pixel sizes, dead-pixel-free
+    at the far edge."""
     n = len(ratios)
     if n == 0:
         return []
-    natural = [available * r for r in ratios]
-    deficits = [max(0.0, minimums[i] - natural[i]) for i in range(n)]
-    total_deficit = sum(deficits)
-    if total_deficit == 0:
-        sizes = [int(s) for s in natural]
-        sizes[-1] += available - sum(sizes)
-        return sizes
-
-    slack = [max(0.0, natural[i] - minimums[i]) for i in range(n)]
-    total_slack = sum(slack)
-    if total_slack > 0:
-        factor = min(1.0, total_deficit / total_slack)
-        sized = [
-            minimums[i] if deficits[i] > 0 else natural[i] - slack[i] * factor
-            for i in range(n)
-        ]
-    else:
-        sized = [max(natural[i], minimums[i]) for i in range(n)]
-    return [int(s) for s in sized]
+    sizes = [int(available * r) for r in ratios]
+    sizes[-1] += available - sum(sizes)
+    return sizes
 
 
 def compute_all_rects(node, rect, gap, out=None):

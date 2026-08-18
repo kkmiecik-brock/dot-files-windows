@@ -58,7 +58,8 @@
       "corner_style": "rounded"
     },
     "workspaces": {
-      "Remote_Monitor": 10
+      "Remote_Monitor": 10,
+      "AUO6092": 10
     },
     "ignore_rules": [
       { "class": ["Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW", "Windows.UI.Core.CoreWindow", "ForegroundStaging", "MultitaskingViewFrame", "TaskListThumbnailWnd", "SysShadow", "tooltips_class32", "#32768", "XamlExplorerHostIslandWindow", "SnagIt9Editor"] },
