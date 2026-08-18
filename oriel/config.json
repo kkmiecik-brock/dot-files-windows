@@ -16,7 +16,27 @@
     { "modifiers": ["alt", "ctrl", "shift"], "key": "L", "target": "tiling", "action": "resize_grow" },
     { "modifiers": ["alt", "ctrl", "shift"], "key": "H", "target": "tiling", "action": "resize_shrink" },
     { "modifiers": ["alt", "shift"], "key": "R", "target": "hotkeyd", "action": "reload_config" },
-    { "modifiers": ["alt", "ctrl"], "key": "`", "target": "taskbar", "action": "toggle" }
+    { "modifiers": ["alt", "ctrl"], "key": "`", "target": "taskbar", "action": "toggle" },
+    { "modifiers": ["alt"], "key": "1", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 1 } },
+    { "modifiers": ["alt"], "key": "2", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 2 } },
+    { "modifiers": ["alt"], "key": "3", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 3 } },
+    { "modifiers": ["alt"], "key": "4", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 4 } },
+    { "modifiers": ["alt"], "key": "5", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 5 } },
+    { "modifiers": ["alt"], "key": "6", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 6 } },
+    { "modifiers": ["alt"], "key": "7", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 7 } },
+    { "modifiers": ["alt"], "key": "8", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 8 } },
+    { "modifiers": ["alt"], "key": "9", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 9 } },
+    { "modifiers": ["alt"], "key": "0", "target": "tiling", "action": "switch_workspace", "args": { "workspace": 10 } },
+    { "modifiers": ["alt", "ctrl"], "key": "1", "target": "tiling", "action": "move_to_workspace", "args": { "workspace": 1 } },
+    { "modifiers": ["alt", "ctrl"], "key": "2", "target": "tiling", "action": "move_to_workspace", "args": { "workspace": 2 } },
+    { "modifiers": ["alt", "ctrl"], "key": "3", "target": "tiling", "action": "move_to_workspace", "args": { "workspace": 3 } },
+    { "modifiers": ["alt", "ctrl"], "key": "4", "target": "tiling", "action": "move_to_workspace", "args": { "workspace": 4 } },
+    { "modifiers": ["alt", "ctrl"], "key": "5", "target": "tiling", "action": "move_to_workspace", "args": { "workspace": 5 } },
+    { "modifiers": ["alt", "ctrl"], "key": "6", "target": "tiling", "action": "move_to_workspace", "args": { "workspace": 6 } },
+    { "modifiers": ["alt", "ctrl"], "key": "7", "target": "tiling", "action": "move_to_workspace", "args": { "workspace": 7 } },
+    { "modifiers": ["alt", "ctrl"], "key": "8", "target": "tiling", "action": "move_to_workspace", "args": { "workspace": 8 } },
+    { "modifiers": ["alt", "ctrl"], "key": "9", "target": "tiling", "action": "move_to_workspace", "args": { "workspace": 9 } },
+    { "modifiers": ["alt", "ctrl"], "key": "0", "target": "tiling", "action": "move_to_workspace", "args": { "workspace": 10 } }
   ],
   "taskbar": {
     "enabled": true,
@@ -31,6 +51,15 @@
   "tiling": {
     "inner_gap": 10,
     "outer_gap": { "top": 10, "right": 10, "bottom": 10, "left": 10 },
+    "resize_step": 0.01,
+    "border": {
+      "enabled": true,
+      "color": "#cba6f7",
+      "corner_style": "rounded"
+    },
+    "workspaces": {
+      "Remote_Monitor": 10
+    },
     "ignore_rules": [
       { "class": ["Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW", "Windows.UI.Core.CoreWindow", "ForegroundStaging", "MultitaskingViewFrame", "TaskListThumbnailWnd", "SysShadow", "tooltips_class32", "#32768", "XamlExplorerHostIslandWindow", "SnagIt9Editor"] },
       { "process": ["explorer.exe", "flow.launcher.exe", "taskmgr.exe", "windows365.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "textinputhost.exe", "systemsettings.exe", "logioverlay.exe", "logioptions.exe", "powertoys.quickaccess.exe", "microsoft.cmdpal.ui.exe", "selfservice.exe"] },

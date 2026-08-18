@@ -16,17 +16,24 @@ import ctypes
 import queue
 import threading
 import time
+import logging
 from ctypes import wintypes
 
 import win32api
+import win32con
 import win32gui
+import win32process
 
 from oriel.config import get_section
+from oriel.tiling import border
 from oriel.tiling import geometry
+from oriel.tiling import persistence
 from oriel.tiling import policy
 from oriel.tiling import tree
 from oriel.tiling.filters import is_cloaked, is_manageable, load_ignore_rules
-from oriel.tiling.state import DEFAULT_GAP, DEFAULT_OUTER_GAP
+from oriel.tiling.state import DEFAULT_BORDER, DEFAULT_GAP, DEFAULT_OUTER_GAP, DEFAULT_RESIZE_STEP, DEFAULT_WORKSPACE
+
+logger = logging.getLogger(__name__)
 
 # How long a hwnd stays in _recently_finalized after record_drag_kind handles
 # it, so the WinEvent-driven fallback for the very same drag knows to skip
@@ -63,6 +70,11 @@ _manageable_retry_scheduled = set()
 # see enforce_tiled_placement, which must never fight a real gesture.
 _active_gestures = set()
 
+# hwnd currently outlined by the focus border, or None - lets LOCATIONCHANGE
+# cheaply skip re-evaluating the border for the many unrelated windows that
+# fire it, only reacting when the bordered window itself moves/resizes.
+_bordered_hwnd = None
+
 # --- Posted-event queue (IPC thread -> message-loop thread) ------------------
 
 WM_APP_EVENT = 0x8000 + 1  # WM_APP + 1
@@ -90,16 +102,30 @@ def _drain_posted_events():
             handler, args = _event_queue.get_nowait()
         except queue.Empty:
             return
-        handler(*args)
+        try:
+            handler(*args)
+        except Exception:
+            logger.exception("posted event handler %s failed", getattr(handler, "__name__", handler))
 
 
 # --- Settings ----------------------------------------------------------------
+
+def _hex_to_colorref(hex_color):
+    """'#rrggbb' -> a Win32 COLORREF int (0x00BBGGRR - reversed byte order
+    from the hex string's RRGGBB)."""
+    value = int(hex_color.lstrip("#"), 16)
+    r, g, b = (value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF
+    return r | (g << 8) | (b << 16)
+
 
 def _load_settings():
     tiling = get_section("tiling")
     return {
         "inner_gap": tiling.get("inner_gap", DEFAULT_GAP),
         "outer_gap": {**DEFAULT_OUTER_GAP, **tiling.get("outer_gap", {})},
+        "resize_step": tiling.get("resize_step", DEFAULT_RESIZE_STEP),
+        "workspaces": tiling.get("workspaces", {}),
+        "border": {**DEFAULT_BORDER, **tiling.get("border", {})},
     }
 
 
@@ -107,17 +133,41 @@ def apply_initial_settings():
     settings = _load_settings()
     _state.inner_gap = settings["inner_gap"]
     _state.outer_gap = settings["outer_gap"]
+    _state.resize_step = settings["resize_step"]
+    _state.workspaces = settings["workspaces"]
+    _state.border = settings["border"]
     load_ignore_rules()
 
 
 def reload_settings(_data=None):
-    """Re-reads inner_gap/outer_gap/ignore_rules from config.json and
-    reflows every monitor immediately so the change is visible right away."""
+    """Re-reads inner_gap/outer_gap/resize_step/border/ignore_rules from
+    config.json and reflows every monitor immediately so the change is
+    visible right away."""
+    old_workspaces = _state.workspaces
     settings = _load_settings()
     _state.inner_gap = settings["inner_gap"]
     _state.outer_gap = settings["outer_gap"]
+    _state.resize_step = settings["resize_step"]
+    _state.workspaces = settings["workspaces"]
+    _state.border = settings["border"]
     load_ignore_rules()
+    _migrate_newly_configured_monitors(old_workspaces)
     _state.reflow_all()
+    update_focus_border()
+
+
+def _migrate_newly_configured_monitors(old_workspaces_config):
+    """A monitor that just went from unconfigured to configured via this
+    reload has all its existing windows sitting at DEFAULT_WORKSPACE, which
+    no hotkey can reach once real workspaces exist - move them to
+    workspace 1 (the new active default) instead of stranding them there."""
+    for monitor in _state.known_monitors():
+        stable_id = geometry.stable_monitor_id(monitor)
+        was_configured = stable_id is not None and old_workspaces_config.get(stable_id, 0) > 0
+        if _state.workspace_count(monitor) > 0 and not was_configured:
+            _state.migrate_workspace(monitor, DEFAULT_WORKSPACE, 1)
+            _state.set_active_workspace(monitor, 1)
+            _persist_workspace_state(monitor)
 
 
 def reflow_all(_data=None):
@@ -128,9 +178,45 @@ def reflow_all(_data=None):
     _state.reflow_all()
 
 
+# --- Focus border --------------------------------------------------------------
+
+def update_focus_border():
+    """Applies the native DWM accent-border + corner-rounding highlight to
+    whichever window tiling currently considers focused, clearing it from
+    whichever window had it before - cleared entirely if the new foreground
+    window isn't one of oriel's tiled windows (untracked, or on a workspace
+    that isn't currently active on its monitor). Always unconditionally
+    re-applies rather than skipping when "nothing changed" per internal
+    tracking - enforce_tiled_placement's SetWindowPos calls (which reposition
+    a tiled window back onto its tile on every focus/location change) can
+    silently reset DWM's border attribute as a side effect, so trusting
+    _bordered_hwnd alone isn't reliable; re-asserting is cheap and safe."""
+    global _bordered_hwnd
+    highlight = None
+    if _state.border.get("enabled", True):
+        fg = win32gui.GetForegroundWindow()
+        if fg and win32gui.IsWindow(fg):
+            monitor, workspace, leaf = _state.find_leaf_any_monitor(fg)
+            if leaf is not None and workspace == _state.active_workspace(monitor):
+                highlight = fg
+
+    if _bordered_hwnd is not None and _bordered_hwnd != highlight and win32gui.IsWindow(_bordered_hwnd):
+        border.clear_border(_bordered_hwnd)
+    if highlight is not None:
+        border.set_border(highlight, _hex_to_colorref(_state.border["color"]), _state.border["corner_style"])
+    _bordered_hwnd = highlight
+
+
 # --- Window lifecycle ---------------------------------------------------------
 
 def bootstrap_existing_windows():
+    persisted = persistence.load()
+    for handle, _hdc, _rect in win32api.EnumDisplayMonitors():
+        monitor = int(handle)
+        entry = persistence.entry_for(monitor, persisted)
+        if entry is not None:
+            _state.set_active_workspace(monitor, entry.get("active", DEFAULT_WORKSPACE))
+
     handles = []
 
     def callback(hwnd, _):
@@ -144,8 +230,65 @@ def bootstrap_existing_windows():
     # see "on top" of the initial layout.
     for hwnd in reversed(handles):
         if is_manageable(hwnd):
-            _state.insert_hwnd(geometry.monitor_of(hwnd), hwnd)
+            monitor = geometry.monitor_of(hwnd)
+            entry = persistence.entry_for(monitor, persisted)
+            workspace = entry.get("windows", {}).get(str(hwnd)) if entry else None
+            if workspace is None:
+                workspace = _state.active_workspace(monitor)
+            _state.insert_hwnd(monitor, hwnd, workspace)
     _state.reflow_all()
+    update_focus_border()
+
+
+# --- Display change handling ---------------------------------------------------
+
+DISPLAY_CHANGE_WATCHER_CLASS = "OrielDisplayChangeWatcher"
+WM_DISPLAYCHANGE = 0x007E
+DISPLAY_CHANGE_DEBOUNCE = 0.5  # coalesces bursts of WM_DISPLAYCHANGE while a resolution change settles
+
+_display_change_timer = None
+
+
+def _display_watcher_wnd_proc(hwnd, msg, wparam, lparam):
+    if msg == WM_DISPLAYCHANGE:
+        _schedule_display_resync()
+        return 0
+    return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+
+
+def create_display_change_watcher():
+    """A hidden, never-shown top-level window purely to receive
+    WM_DISPLAYCHANGE - that message is sent to top-level windows, not
+    broadcast to threads without one, so oriel needs an actual (invisible)
+    window to see it at all. Must be created on the message-loop thread -
+    see run_message_loop()."""
+    wc = win32gui.WNDCLASS()
+    wc.lpfnWndProc = _display_watcher_wnd_proc
+    wc.lpszClassName = DISPLAY_CHANGE_WATCHER_CLASS
+    win32gui.RegisterClass(wc)
+    return win32gui.CreateWindow(
+        DISPLAY_CHANGE_WATCHER_CLASS, None, 0, 0, 0, 0, 0, 0, 0, win32api.GetModuleHandle(None), None,
+    )
+
+
+def _schedule_display_resync():
+    global _display_change_timer
+    if _display_change_timer is not None:
+        _display_change_timer.cancel()
+    _display_change_timer = threading.Timer(DISPLAY_CHANGE_DEBOUNCE, lambda: post(resync_after_display_change))
+    _display_change_timer.start()
+
+
+def resync_after_display_change(_data=None):
+    """A monitor was added/removed, or its resolution/arrangement changed.
+    HMONITOR handles can go stale or shift identity across this, and any
+    window that was already open (not freshly shown) never generates a new
+    on_window_shown to be rediscovered against the new geometry - so this
+    rebuilds tiling state from scratch, exactly like restarting the tiling
+    daemon would fix, without actually restarting the process."""
+    geometry.invalidate_display_caches()
+    _state.reset()
+    bootstrap_existing_windows()
 
 
 def on_window_shown(hwnd):
@@ -161,8 +304,11 @@ def on_window_shown(hwnd):
     # Newly opened windows go to whichever monitor the cursor is on, not
     # wherever Windows happened to place the window initially.
     monitor = geometry.monitor_at_cursor()
-    _state.insert_hwnd(monitor, hwnd)
-    _state.reflow(monitor)
+    workspace = _state.active_workspace(monitor)
+    _state.insert_hwnd(monitor, hwnd, workspace)
+    _state.reflow(monitor, workspace)
+    _persist_workspace_state(monitor)
+    update_focus_border()
 
 
 def _maybe_retry_window_shown(hwnd):
@@ -243,6 +389,9 @@ def on_window_destroyed(hwnd):
         return
     _state.remove_leaf(monitor, leaf, workspace)
     _state.reflow(monitor, workspace)
+    _persist_workspace_state(monitor)
+    if hwnd == _bordered_hwnd:
+        update_focus_border()
 
 
 def on_window_hidden(hwnd):
@@ -260,78 +409,187 @@ def on_window_hidden(hwnd):
     monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None:
         return
+    if workspace != _state.active_workspace(monitor):
+        return  # hidden because its workspace isn't active right now - our own switch-away, not a real hide
     _state.remove_leaf(monitor, leaf, workspace)
     _state.reflow(monitor, workspace)
+    _persist_workspace_state(monitor)
+    if hwnd == _bordered_hwnd:
+        update_focus_border()
 
 
 # --- Focus / move / resize hotkey commands ------------------------------------
+
+def _force_foreground(target_hwnd):
+    """SetForegroundWindow silently fails (Windows' foreground-lock
+    restriction) when called from a background process that didn't itself
+    receive the triggering input - exactly this daemon's situation, since
+    hotkeyd receives the real keypress and forwards it over IPC. Same
+    AttachThreadInput trick drag.py's _force_foreground already proved."""
+    current_thread = win32api.GetCurrentThreadId()
+    fg_hwnd = win32gui.GetForegroundWindow()
+    fg_thread = win32process.GetWindowThreadProcessId(fg_hwnd)[0] if fg_hwnd else 0
+    target_thread = win32process.GetWindowThreadProcessId(target_hwnd)[0]
+
+    attached_fg = fg_thread and fg_thread != current_thread and win32process.AttachThreadInput(current_thread, fg_thread, True)
+    attached_target = target_thread and target_thread != current_thread and win32process.AttachThreadInput(current_thread, target_thread, True)
+    try:
+        win32gui.BringWindowToTop(target_hwnd)
+        win32gui.SetForegroundWindow(target_hwnd)
+    except win32gui.error:
+        pass
+    finally:
+        if attached_fg:
+            win32process.AttachThreadInput(current_thread, fg_thread, False)
+        if attached_target:
+            win32process.AttachThreadInput(current_thread, target_thread, False)
+
 
 def focus_direction(direction):
     hwnd = win32gui.GetForegroundWindow()
     if not hwnd:
         return
-    monitor = geometry.monitor_of(hwnd)
-
-    current_leaf = tree.find_leaf(_state.root(monitor), hwnd)
+    monitor, workspace, current_leaf = _state.find_leaf_any_monitor(hwnd)
     if current_leaf is None:
         return
 
     target = tree.find_direction_target(
-        _state.root(monitor), current_leaf, direction, _state.inner_gap, _state.work_area(monitor)
+        _state.root(monitor, workspace), current_leaf, direction, _state.inner_gap, _state.work_area(monitor)
     )
     if target is None:
         return
-    _state.set_focused_leaf(monitor, target)
+    _state.set_focused_leaf(monitor, target, workspace)
 
     if win32gui.IsWindow(target.item):
-        win32gui.SetForegroundWindow(target.item)
+        _force_foreground(target.item)
+        update_focus_border()
 
 
 def move_direction(direction):
     hwnd = win32gui.GetForegroundWindow()
     if not hwnd:
         return
-    monitor = geometry.monitor_of(hwnd)
-
-    current_leaf = tree.find_leaf(_state.root(monitor), hwnd)
+    monitor, workspace, current_leaf = _state.find_leaf_any_monitor(hwnd)
     if current_leaf is None:
         return
     target = tree.find_direction_target(
-        _state.root(monitor), current_leaf, direction, _state.inner_gap, _state.work_area(monitor)
+        _state.root(monitor, workspace), current_leaf, direction, _state.inner_gap, _state.work_area(monitor)
     )
     if target is None:
         return
     current_leaf.item, target.item = target.item, current_leaf.item
-    _state.reflow(monitor)
+    _state.reflow(monitor, workspace)
 
 
 def resize(delta):
     hwnd = win32gui.GetForegroundWindow()
     if not hwnd:
         return
-    monitor = geometry.monitor_of(hwnd)
-
-    leaf = tree.find_leaf(_state.root(monitor), hwnd)
+    monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None or leaf.parent is None:
         return
     tree.resize(leaf, delta)
-    _state.reflow(monitor)
+    _state.reflow(monitor, workspace)
+
+
+def resize_grow(_data=None):
+    resize(_state.resize_step)
+
+
+def resize_shrink(_data=None):
+    resize(-_state.resize_step)
 
 
 def toggle_fullscreen(_data=None):
     hwnd = win32gui.GetForegroundWindow()
     if not hwnd:
         return
-    monitor = geometry.monitor_of(hwnd)
-
-    leaf = tree.find_leaf(_state.root(monitor), hwnd)
+    monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None:
         return
-    if _state.fullscreen_leaf(monitor) is leaf:
-        _state.clear_fullscreen_leaf(monitor)
+    if _state.fullscreen_leaf(monitor, workspace) is leaf:
+        _state.clear_fullscreen_leaf(monitor, workspace)
     else:
-        _state.set_fullscreen_leaf(monitor, leaf)
-    _state.reflow(monitor)
+        _state.set_fullscreen_leaf(monitor, leaf, workspace)
+    _state.reflow(monitor, workspace)
+    update_focus_border()
+
+
+# --- Workspaces ----------------------------------------------------------------
+
+def _persist_workspace_state(monitor):
+    if _state.workspace_count(monitor) > 0:
+        persistence.save_monitor(_state, monitor)
+
+
+def _monitor_for_workspace_switch():
+    """Which monitor a workspace hotkey should act on: the focused window's
+    monitor if there is one, else whichever monitor the cursor is on."""
+    hwnd = win32gui.GetForegroundWindow()
+    if hwnd:
+        return geometry.monitor_of(hwnd)
+    return geometry.monitor_at_cursor()
+
+
+def switch_workspace(monitor, target_workspace):
+    """Hides every window on monitor's currently active workspace and shows
+    target_workspace's, without touching tree structure at all - a
+    workspace switch is a visibility change, not a hide/destroy, so each
+    workspace's layout survives switching away from it untouched."""
+    current_workspace = _state.active_workspace(monitor)
+    if target_workspace == current_workspace or target_workspace > _state.workspace_count(monitor):
+        return
+
+    for leaf in tree.all_leaves(_state.root(monitor, current_workspace)):
+        if win32gui.IsWindow(leaf.item):
+            win32gui.ShowWindow(leaf.item, win32con.SW_HIDE)
+
+    _state.set_active_workspace(monitor, target_workspace)
+
+    for leaf in tree.all_leaves(_state.root(monitor, target_workspace)):
+        if win32gui.IsWindow(leaf.item):
+            win32gui.ShowWindow(leaf.item, win32con.SW_SHOWNA)
+    _state.reflow(monitor, target_workspace)
+
+    focused = _state.focused_leaf(monitor, target_workspace)
+    if focused is not None and win32gui.IsWindow(focused.item):
+        _force_foreground(focused.item)
+
+    _persist_workspace_state(monitor)
+    update_focus_border()
+
+
+def switch_workspace_action(data):
+    if not data or "workspace" not in data:
+        return
+    switch_workspace(_monitor_for_workspace_switch(), data["workspace"])
+
+
+def move_to_workspace(target_workspace):
+    """Reassigns the focused window to target_workspace on its own monitor.
+    The view stays on the current workspace - the window just disappears,
+    matching i3's default "move, don't follow" behavior."""
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd:
+        return
+    monitor, current_workspace, leaf = _state.find_leaf_any_monitor(hwnd)
+    if leaf is None or current_workspace == target_workspace or target_workspace > _state.workspace_count(monitor):
+        return
+
+    _state.remove_leaf(monitor, leaf, current_workspace)
+    _state.insert_hwnd(monitor, hwnd, target_workspace)
+    _state.reflow(monitor, current_workspace)
+    _state.reflow(monitor, target_workspace)
+    win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+
+    _persist_workspace_state(monitor)
+    update_focus_border()
+
+
+def move_to_workspace_action(data):
+    if not data or "workspace" not in data:
+        return
+    move_to_workspace(data["workspace"])
 
 
 # --- Move/resize gesture finalize --------------------------------------------
@@ -451,19 +709,28 @@ user32.UnhookWinEvent.argtypes = [wintypes.HANDLE]
 def _win_event_proc(hWinEventHook, event, hwnd, idObject, idChild, idEventThread, dwmsEventTime):
     if idObject != OBJID_WINDOW or idChild != CHILDID_SELF or not hwnd:
         return
-    if event in (EVENT_OBJECT_SHOW, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_UNCLOAKED):
-        on_window_shown(hwnd)
-    elif event == EVENT_OBJECT_DESTROY:
-        on_window_destroyed(hwnd)
-    elif event in (EVENT_OBJECT_HIDE, EVENT_OBJECT_CLOAKED):
-        on_window_hidden(hwnd)
-    elif event == EVENT_SYSTEM_MOVESIZEEND:
-        on_move_resize_end(hwnd)
-    elif event == EVENT_SYSTEM_MOVESIZESTART:
-        on_move_resize_start(hwnd)
-    elif event in (EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND):
-        recheck_if_pending(hwnd)
-        enforce_tiled_placement(hwnd)
+    try:
+        if event in (EVENT_OBJECT_SHOW, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_UNCLOAKED):
+            on_window_shown(hwnd)
+        elif event == EVENT_OBJECT_DESTROY:
+            on_window_destroyed(hwnd)
+        elif event in (EVENT_OBJECT_HIDE, EVENT_OBJECT_CLOAKED):
+            on_window_hidden(hwnd)
+        elif event == EVENT_SYSTEM_MOVESIZEEND:
+            on_move_resize_end(hwnd)
+        elif event == EVENT_SYSTEM_MOVESIZESTART:
+            on_move_resize_start(hwnd)
+        elif event == EVENT_SYSTEM_FOREGROUND:
+            recheck_if_pending(hwnd)
+            enforce_tiled_placement(hwnd)
+            update_focus_border()
+        elif event == EVENT_OBJECT_LOCATIONCHANGE:
+            recheck_if_pending(hwnd)
+            enforce_tiled_placement(hwnd)
+            if hwnd == _bordered_hwnd:
+                update_focus_border()
+    except Exception:
+        logger.exception("WinEvent handler failed for event=%s hwnd=%s", event, hwnd)
 
 
 def run_message_loop():
@@ -472,6 +739,8 @@ def run_message_loop():
     the IPC thread reaches this thread only via post()."""
     global _main_thread_id
     _main_thread_id = win32api.GetCurrentThreadId()
+
+    create_display_change_watcher()
 
     # Keep a reference so the ctypes callback isn't garbage-collected.
     win_event_proc = WINEVENTPROC(_win_event_proc)

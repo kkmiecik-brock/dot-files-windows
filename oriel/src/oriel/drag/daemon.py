@@ -14,6 +14,7 @@ proven-working approach.
 import ctypes
 import threading
 import time
+import logging
 from ctypes import wintypes
 
 import win32api
@@ -23,6 +24,9 @@ import win32process
 
 from oriel.config import get_section
 from oriel.ipc import send_action, serve_actions
+from oriel.logging_setup import configure_logging
+
+logger = logging.getLogger(__name__)
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -229,19 +233,24 @@ def _drag_loop():
 
 
 def _mouse_proc(nCode, wParam, lParam):
-    if nCode == 0:
-        move_down = BUTTON_DOWN_MSGS.get(settings["move_button"])
-        resize_down = BUTTON_DOWN_MSGS.get(settings["resize_button"])
+    try:
+        if nCode == 0:
+            move_down = BUTTON_DOWN_MSGS.get(settings["move_button"])
+            resize_down = BUTTON_DOWN_MSGS.get(settings["resize_button"])
 
-        if not dragging and wParam in (move_down, resize_down) and _modifier_down():
-            info = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-            action = "move" if wParam == move_down else "resize"
-            _begin_drag(action, info.pt.x, info.pt.y)
-            if dragging:
+            if not dragging and wParam in (move_down, resize_down) and _modifier_down():
+                info = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+                action = "move" if wParam == move_down else "resize"
+                _begin_drag(action, info.pt.x, info.pt.y)
+                if dragging:
+                    return 1
+            elif dragging and wParam in (WM_LBUTTONUP, WM_RBUTTONUP):
+                _end_drag()
                 return 1
-        elif dragging and wParam in (WM_LBUTTONUP, WM_RBUTTONUP):
-            _end_drag()
-            return 1
+    except Exception:
+        # MUST still fall through to CallNextHookEx below - a low-level
+        # hook that never calls it can stall/break system-wide input.
+        logger.exception("mouse hook proc failed")
 
     return user32.CallNextHookEx(hook_handle, nCode, wParam, lParam)
 
@@ -255,6 +264,15 @@ ACTIONS = {"reload": _reload}
 
 
 def run():
+    configure_logging("drag")
+    try:
+        _run()
+    except Exception:
+        logger.exception("drag daemon crashed")
+        raise
+
+
+def _run():
     global hook_handle, settings
 
     # Without DPI awareness, Windows can virtualize/scale the coordinates this

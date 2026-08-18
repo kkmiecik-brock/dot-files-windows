@@ -8,10 +8,13 @@ running, the message is silently dropped rather than raising, so callers
 never need to know or care whether the other module is alive.
 """
 import json
+import logging
 
 import pywintypes
 import win32file
 import win32pipe
+
+logger = logging.getLogger(__name__)
 
 PIPE_PREFIX = r"\\.\pipe\oriel-"
 
@@ -53,5 +56,7 @@ def serve_actions(name, actions):
                 action(message.get("data"))
         except (pywintypes.error, ValueError):
             pass
+        except Exception:
+            logger.exception("action handler failed for message on pipe %s", pipe_name)
         finally:
             win32file.CloseHandle(pipe)

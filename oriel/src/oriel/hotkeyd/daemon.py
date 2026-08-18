@@ -12,12 +12,16 @@ is expected to be an independent process listening on its own pipe. If the
 target isn't running, the message is silently dropped.
 """
 import os
+import logging
 
 import win32con
 import win32gui
 
 from oriel.config import load_config
 from oriel.ipc import send_action
+from oriel.logging_setup import configure_logging
+
+logger = logging.getLogger(__name__)
 
 MOD_MAP = {
     "alt": win32con.MOD_ALT,
@@ -33,6 +37,12 @@ VK_OEM_3 = 0xC0  # '`~' key on US keyboards - not in win32con, and not its ASCII
 # their own settings whenever "reload_config" fires. taskbar isn't here -
 # it already re-reads config.json every poll_interval on its own.
 RELOADABLE_TARGETS = ["tiling", "drag"]
+
+# Actions whose hotkey args carry data the target needs (e.g. which
+# workspace number) - forwarded as the IPC payload. Every other tiling
+# action is a separate hardcoded name instead (resize_grow/resize_shrink
+# etc.), so args are intentionally NOT forwarded for those.
+ACTIONS_WITH_DATA = {"switch_workspace", "move_to_workspace"}
 
 
 def _vk_for(key_name):
@@ -86,6 +96,15 @@ def _reload_config():
 
 
 def run():
+    configure_logging("hotkeyd")
+    try:
+        _run()
+    except Exception:
+        logger.exception("hotkeyd daemon crashed")
+        raise
+
+
+def _run():
     id_to_binding = _register_all(load_config()["bindings"])
 
     try:
@@ -101,14 +120,19 @@ def run():
             if binding is None:
                 continue
 
-            target = binding.get("target", "hotkeyd")
-            action = binding["action"]
-            if action == "reload_config":
-                _unregister_all(id_to_binding)
-                id_to_binding = _reload_config()
-            elif target == "hotkeyd":
-                LOCAL_ACTIONS[action](binding.get("args", {}))
-            else:
-                send_action(target, action)
+            try:
+                target = binding.get("target", "hotkeyd")
+                action = binding["action"]
+                if action == "reload_config":
+                    _unregister_all(id_to_binding)
+                    id_to_binding = _reload_config()
+                elif target == "hotkeyd":
+                    LOCAL_ACTIONS[action](binding.get("args", {}))
+                elif action in ACTIONS_WITH_DATA:
+                    send_action(target, action, data=binding.get("args"))
+                else:
+                    send_action(target, action)
+            except Exception:
+                logger.exception("hotkey dispatch failed for binding %s", binding)
     finally:
         _unregister_all(id_to_binding)

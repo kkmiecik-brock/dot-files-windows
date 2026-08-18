@@ -21,6 +21,8 @@ DEFAULT_WORKSPACE = 0
 
 DEFAULT_GAP = 8
 DEFAULT_OUTER_GAP = {"top": 0, "right": 0, "bottom": 0, "left": 0}
+DEFAULT_RESIZE_STEP = 0.05
+DEFAULT_BORDER = {"enabled": True, "color": "#cba6f7", "corner_style": "rounded"}
 
 # How many consecutive "learned a bigger minimum, try again" passes reflow()
 # allows within one triggering event, before accepting the current
@@ -35,8 +37,23 @@ class TilingState:
         self._roots = {}
         self._focused_leaf = {}
         self._fullscreen_leaf = {}
+        self._active_workspace = {}
         self.inner_gap = DEFAULT_GAP
         self.outer_gap = DEFAULT_OUTER_GAP
+        self.resize_step = DEFAULT_RESIZE_STEP
+        self.border = DEFAULT_BORDER
+        self.workspaces = {}  # stable monitor id -> configured workspace count
+
+    def reset(self):
+        """Drops all monitor/window/workspace-derived state (everything
+        keyed by HMONITOR, which can go stale across a display change) -
+        settings loaded from config (gaps, resize_step, border, workspaces)
+        are untouched. Used to rebuild tiling state in place after a
+        WM_DISPLAYCHANGE, without restarting the daemon process."""
+        self._roots = {}
+        self._focused_leaf = {}
+        self._fullscreen_leaf = {}
+        self._active_workspace = {}
 
     @staticmethod
     def _key(monitor, workspace=DEFAULT_WORKSPACE):
@@ -62,6 +79,45 @@ class TilingState:
 
     def clear_fullscreen_leaf(self, monitor, workspace=DEFAULT_WORKSPACE):
         self._fullscreen_leaf.pop(self._key(monitor, workspace), None)
+
+    def active_workspace(self, monitor):
+        active = self._active_workspace.get(monitor)
+        if active is not None:
+            return active
+        # 0 is reserved for "unconfigured monitor" and unreachable by any
+        # hotkey once real workspaces exist (Alt+1-9,0 only maps to 1-10) -
+        # a configured monitor with no explicit active workspace yet
+        # defaults to workspace 1, not the unreachable sentinel.
+        return 1 if self.workspace_count(monitor) > 0 else DEFAULT_WORKSPACE
+
+    def set_active_workspace(self, monitor, workspace):
+        self._active_workspace[monitor] = workspace
+
+    def workspace_count(self, monitor):
+        """0 means unconfigured - today's single-implicit-workspace behavior."""
+        stable_id = geometry.stable_monitor_id(monitor)
+        if stable_id is None:
+            return 0
+        return self.workspaces.get(stable_id, 0)
+
+    def known_monitors(self):
+        return {monitor for monitor, _workspace in self._roots}
+
+    def migrate_workspace(self, monitor, from_workspace, to_workspace):
+        """Re-keys everything under (monitor, from_workspace) to (monitor,
+        to_workspace) - for a monitor whose workspace config just went from
+        unconfigured to configured mid-session, so windows already tiled at
+        the now-unreachable DEFAULT_WORKSPACE aren't stranded there. Purely
+        internal bookkeeping - windows stay exactly as visible/hidden as
+        they already were."""
+        from_key, to_key = self._key(monitor, from_workspace), self._key(monitor, to_workspace)
+        if from_key not in self._roots:
+            return
+        self._roots[to_key] = self._roots.pop(from_key)
+        if from_key in self._focused_leaf:
+            self._focused_leaf[to_key] = self._focused_leaf.pop(from_key)
+        if from_key in self._fullscreen_leaf:
+            self._fullscreen_leaf[to_key] = self._fullscreen_leaf.pop(from_key)
 
     def work_area(self, monitor):
         return geometry.work_area(monitor, self.outer_gap)
@@ -95,6 +151,17 @@ class TilingState:
             if leaf is not None:
                 return monitor, workspace, leaf
         return None, None, None
+
+    def hwnd_workspaces(self, monitor):
+        """{hwnd: workspace} for every hwnd currently tiled anywhere on
+        `monitor` (across all its workspaces) - used for persistence."""
+        result = {}
+        for (mon, workspace), root in self._roots.items():
+            if mon != monitor:
+                continue
+            for leaf in tree.all_leaves(root):
+                result[leaf.item] = workspace
+        return result
 
     def reflow(self, monitor, workspace=DEFAULT_WORKSPACE, _min_size_pass=0):
         rects = self.compute_rects(monitor, workspace)

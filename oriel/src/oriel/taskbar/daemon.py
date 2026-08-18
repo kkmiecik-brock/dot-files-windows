@@ -9,12 +9,16 @@ daemon to reflow, since that changes how much work area it has to fill.
 """
 import threading
 import time
+import logging
 
 import win32con
 import win32gui
 
 from oriel.config import get_section
 from oriel.ipc import send_action, serve_actions
+from oriel.logging_setup import configure_logging
+
+logger = logging.getLogger(__name__)
 
 TASKBAR_CLASSES = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
 
@@ -77,9 +81,15 @@ ACTIONS = {"toggle": toggle}
 
 
 def run():
+    configure_logging("taskbar")
     threading.Thread(target=serve_actions, args=("taskbar", ACTIONS), daemon=True).start()
+    poll_interval = DEFAULTS["poll_interval"]
     while True:
-        settings = _load_settings()
-        should_hide = _override if _override is not None else settings["enabled"]
-        _apply(should_hide)
-        time.sleep(settings["poll_interval"])
+        try:
+            settings = _load_settings()
+            poll_interval = settings["poll_interval"]
+            should_hide = _override if _override is not None else settings["enabled"]
+            _apply(should_hide)
+        except Exception:
+            logger.exception("taskbar poll loop failed")
+        time.sleep(poll_interval)

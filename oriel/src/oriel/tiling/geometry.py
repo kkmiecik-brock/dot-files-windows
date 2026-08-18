@@ -60,6 +60,63 @@ def monitor_at_point(point):
     return int(win32api.MonitorFromPoint(point, win32con.MONITOR_DEFAULTTONEAREST))
 
 
+# monitor -> stable ID (or None), populated by stable_monitor_id on first
+# use. A monitor's HMONITOR and \\.\DISPLAYn device name are both unstable
+# across reconnects/port changes, so config.json's per-monitor workspace
+# settings key on this EDID-derived ID instead. Cached because it costs two
+# Win32 calls and would otherwise get called from every workspace-related
+# window open/close/switch - cleared on WM_DISPLAYCHANGE by
+# invalidate_display_caches() (see events.py's display-change watcher).
+_stable_id_cache = {}
+
+
+def stable_monitor_id(monitor):
+    if monitor not in _stable_id_cache:
+        try:
+            device_name = win32api.GetMonitorInfo(monitor)["Device"]
+            full_id = win32api.EnumDisplayDevices(device_name, 0).DeviceID or None
+            _stable_id_cache[monitor] = _shorten_device_id(full_id)
+        except Exception:
+            _stable_id_cache[monitor] = None
+    return _stable_id_cache[monitor]
+
+
+def _shorten_device_id(device_id):
+    """A monitor DeviceID looks like MONITOR\\<model>\\{4d36e96e-...}\\0002 -
+    the MONITOR\\ prefix and {4d36e96e-...} are Windows' constant Monitor
+    device-class GUID, and the trailing instance number is the LEAST stable
+    part of all (RDP virtual displays get a new instance on every reconnect,
+    real monitors can shift it too on a driver reinstall/port change) - drop
+    both, keeping just <model>, so an RDP session's workspace config survives
+    reconnects. Trade-off accepted: two simultaneous monitors sharing the
+    exact same model (two identical real monitors, or multi-monitor RDP)
+    would collide onto the same id - same class of v1 limitation as the
+    identical-monitor-model caveat already documented for the full id."""
+    if device_id is None:
+        return None
+    parts = device_id.split("\\")
+    return parts[1] if len(parts) == 4 else device_id
+
+
+def list_monitors():
+    """Diagnostic CLI helper (see tiling/__main__.py --list-monitors): prints
+    each connected monitor's stable ID for pasting into config.json's
+    tiling.workspaces, since there's no other way to discover them."""
+    ensure_dpi_awareness()  # must run before any monitor enumeration - see ensure_dpi_awareness
+    for handle, _hdc, _rect in win32api.EnumDisplayMonitors():
+        monitor = int(handle)
+        info = win32api.GetMonitorInfo(monitor)
+        device_name = info["Device"]
+        try:
+            friendly = win32api.EnumDisplayDevices(device_name, 0).DeviceString
+        except Exception:
+            friendly = "(unknown)"
+        print(f"{device_name}  {friendly}")
+        print(f"  bounds: {info['Monitor']}")
+        print(f"  stable id: {stable_monitor_id(monitor)}")
+        print()
+
+
 # monitor -> taskbar hwnd, populated by _find_taskbar_hwnd on first use. See
 # visible_taskbar_rect for why this is cached.
 _taskbar_hwnd_cache = {}
@@ -99,9 +156,8 @@ def visible_taskbar_rect(monitor):
     # cost). The taskbar's hwnd is stable for the life of the explorer.exe
     # process, so only the first call (or one after explorer.exe restarts)
     # needs the full scan - every later call is just two cheap win32 calls
-    # on the already-known hwnd. NOTE: if a monitor is ever connected or
-    # disconnected (task 4, not yet implemented), this cache should be
-    # invalidated too - not needed yet since nothing detects that today.
+    # on the already-known hwnd. Cleared on WM_DISPLAYCHANGE by
+    # invalidate_display_caches() (see events.py's display-change watcher).
     hwnd = _taskbar_hwnd_cache.get(monitor)
     if hwnd is None or not win32gui.IsWindow(hwnd):
         hwnd = _find_taskbar_hwnd(monitor)
@@ -111,6 +167,14 @@ def visible_taskbar_rect(monitor):
     if not win32gui.IsWindowVisible(hwnd):
         return None
     return win32gui.GetWindowRect(hwnd)
+
+
+def invalidate_display_caches():
+    """Call after a WM_DISPLAYCHANGE (monitor added/removed/reconfigured) -
+    HMONITOR handles and taskbar/stable-id associations can all go stale
+    across one, so drop everything keyed by them and let it get relearned."""
+    _taskbar_hwnd_cache.clear()
+    _stable_id_cache.clear()
 
 
 def subtract_taskbar(bounds, taskbar_rect):
