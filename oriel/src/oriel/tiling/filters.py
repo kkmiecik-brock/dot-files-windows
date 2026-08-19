@@ -190,6 +190,8 @@ FLOATING_RULE_DEFAULTS = {
     "gap": 0,
     "width": None,
     "height": None,
+    "center_delay": None,
+    "activate": True,
 }
 
 
@@ -211,9 +213,20 @@ def floating_rule_options(hwnd):
     tiling.outer_gap's ({"top":.., "right":.., "bottom":.., "left":..}).
     "width"/"height" (px, optional - default None means "leave it at
     whatever size it already is") force the window to a specific visible
-    size instead of just repositioning it. "border": false opts a window
-    out of both corner-rounding and focus-border highlighting entirely
-    (see TilingState.add_no_border) - for small/transient windows (e.g. a
+    size instead of just repositioning it. "center_delay" (seconds,
+    optional - default None means "use events.FLOATING_CENTER_MAX_WAIT_
+    SECONDS") overrides how long the non-sticky delayed-center path keeps
+    retrying (it exits as soon as the window actually lands at the target
+    rect, so this is a worst-case ceiling, not a fixed wait) - raise it for
+    an app confirmed to take longer than that to stop fighting its own
+    startup layout. "activate" (default True) also calls SetForegroundWindow
+    once the window is raised, giving it real keyboard focus instead of
+    just z-order (see events._raise_floating_window) - set false for a
+    window that appears on its own (e.g. a Teams meeting/notification
+    popping up) rather than from a deliberate user open, where stealing
+    focus would be disruptive. "border": false opts a window out of both
+    corner-rounding and focus-border highlighting entirely (see
+    TilingState.add_no_border) - for small/transient windows (e.g. a
     screen-share control bar) where oriel's usual per-window chrome looks
     out of place."""
     process_name, class_name, title = _window_identity(hwnd)

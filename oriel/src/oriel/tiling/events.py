@@ -50,8 +50,20 @@ RETRY_INTERVAL = 0.15
 
 # Some packaged apps (Calculator, Windows App) restore their own last-used
 # window position shortly after being shown, overwriting a single centering
-# call - see _delayed_center_floating_window.
-FLOATING_CENTER_DELAY_SECONDS = 0.5
+# call - see _delayed_center_floating_window, which retries against this
+# budget instead of a single fixed wait, so an app that settles quickly
+# (e.g. Explorer) gets positioned as soon as it does rather than always
+# waiting the full amount.
+FLOATING_CENTER_MAX_WAIT_SECONDS = 0.5
+FLOATING_CENTER_RETRY_INTERVAL = 0.05
+
+# A single SWP_ASYNCWINDOWPOS z-order request posted right at window-
+# creation time can lose a race against whatever else is still settling
+# z-order at that exact moment (observed: Explorer occasionally staying
+# behind tiled windows) - see _raise_floating_window, which retries
+# synchronously against this budget instead of trusting one async post.
+FLOATING_RAISE_MAX_WAIT_SECONDS = 0.3
+FLOATING_RAISE_RETRY_INTERVAL = 0.05
 
 # Used instead of tiling.outer_gap when anchor-positioning a floating
 # window (see _center_floating_window) - outer_gap is a tiled-layout
@@ -737,6 +749,7 @@ def _add_floating_window(hwnd, monitor=None):
             threading.Thread(target=border.ensure_rounded, args=(hwnd,), daemon=True).start()
         if _state.floating.get("center_on_open", False):
             center_args = (hwnd, monitor, options["position"], options["gap"], options["width"], options["height"])
+            delayed_args = center_args + (options["center_delay"],)
             if options["sticky"]:
                 # Sticky windows are always a freshly-discovered hwnd (a
                 # brand-new Teams meeting/screen-share window, never an
@@ -751,27 +764,75 @@ def _add_floating_window(hwnd, monitor=None):
                 # snapshot taken before the window had settled.
                 geometry.invalidate_frame_margins(hwnd)
                 threading.Thread(target=_center_floating_window, args=center_args, daemon=True).start()
-                if options["width"] is not None or options["height"] is not None:
-                    # A forced size specifically races the app's own
-                    # content-driven layout in a way plain repositioning
-                    # doesn't (observed: Teams' WebView re-asserting its
-                    # own preferred size shortly after creation, undoing an
-                    # immediate too-small resize) - one extra delayed
-                    # re-assertion (same settle delay as the non-sticky
-                    # path below, not a new timer) catches that without
-                    # giving up the instant initial placement above.
-                    threading.Thread(target=_delayed_center_floating_window, args=center_args, daemon=True).start()
+                # The instant call above can still race the app's own
+                # content-driven layout (observed: Teams' WebView
+                # re-asserting its own preferred size/position shortly
+                # after creation, undoing an immediate placement) whether
+                # or not a size override is set - one extra retry-until-
+                # settled follow-up (same _delayed_center_floating_window
+                # used by the non-sticky path below, not a new timer)
+                # catches that without giving up the instant initial
+                # placement above.
+                threading.Thread(target=_delayed_center_floating_window, args=delayed_args, daemon=True).start()
             else:
-                threading.Thread(target=_delayed_center_floating_window, args=center_args, daemon=True).start()
+                threading.Thread(target=_delayed_center_floating_window, args=delayed_args, daemon=True).start()
+        threading.Thread(target=_raise_floating_window, args=(hwnd, options["topmost"], options["activate"]), daemon=True).start()
+    _persist_workspace_state(monitor)
+    update_focus_border()
+
+
+def _force_foreground(hwnd):
+    """Plain SetForegroundWindow from a background process (this daemon,
+    with no recent user input tied to its own thread) is routinely
+    silently ignored by Windows' focus-stealing prevention - retrying the
+    same call again doesn't help since it's a permission check, not a
+    timing race. AttachThreadInput to whatever currently owns the
+    foreground momentarily shares input state between the two threads,
+    which is the standard workaround Windows itself expects for this."""
+    current_thread = win32api.GetCurrentThreadId()
+    fg = win32gui.GetForegroundWindow()
+    fg_thread = win32process.GetWindowThreadProcessId(fg)[0] if fg else 0
+    attached = bool(fg_thread) and fg_thread != current_thread and ctypes.windll.user32.AttachThreadInput(
+        current_thread, fg_thread, True
+    )
+    try:
+        win32gui.SetForegroundWindow(hwnd)
+    except win32gui.error:
+        pass
+    finally:
+        if attached:
+            ctypes.windll.user32.AttachThreadInput(current_thread, fg_thread, False)
+
+
+def _raise_floating_window(hwnd, topmost, activate):
+    """Repeatedly raises hwnd to the top of its z-order band (HWND_TOPMOST
+    or HWND_TOP) until it's confirmed on top of everything else in that
+    band or the budget runs out, instead of trusting a single
+    SWP_ASYNCWINDOWPOS post to win whatever z-order race is still settling
+    right at window-creation time. If activate, also gives it real
+    keyboard focus via _force_foreground once (after the first successful
+    raise, not on every retry) - windows launched from a background
+    trigger (e.g. a hotkey daemon, not the user directly clicking
+    taskbar/Start) don't reliably get Windows' normal auto-activation."""
+    insert_after = win32con.HWND_TOPMOST if topmost else win32con.HWND_TOP
+    deadline = time.monotonic() + FLOATING_RAISE_MAX_WAIT_SECONDS
+    activated = not activate
+    while win32gui.IsWindow(hwnd):
         try:
             win32gui.SetWindowPos(
-                hwnd, win32con.HWND_TOPMOST if options["topmost"] else win32con.HWND_TOP, 0, 0, 0, 0,
-                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_ASYNCWINDOWPOS,
+                hwnd, insert_after, 0, 0, 0, 0,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE,
             )
         except win32gui.error:
             pass
-    _persist_workspace_state(monitor)
-    update_focus_border()
+        if not activated:
+            _force_foreground(hwnd)
+            activated = True
+        if win32gui.GetWindow(hwnd, win32con.GW_HWNDPREV) == 0:
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(FLOATING_RAISE_RETRY_INTERVAL)
 
 
 def _normalize_gap(gap):
@@ -811,9 +872,14 @@ def _anchor_position(position, area, width, height, gap=0):
 
 
 def _center_floating_window(hwnd, monitor, position="center", gap=0, width=None, height=None):
+    """Computes and applies the anchor position (and optional forced size)
+    for a floating window - returns the exact (left, top, right, bottom)
+    it targeted (in raw GetWindowRect terms), or None if hwnd's rect
+    couldn't be read at all, so callers (_delayed_center_floating_window)
+    can tell whether the window actually landed where intended."""
     rect = geometry.safe_get_window_rect(hwnd)
     if rect is None:
-        return
+        return None
     # GetWindowRect includes the invisible DWM resize/shadow border, so
     # centering on it directly leaves the *visible* frame off-center by
     # whatever that border's margins are - same issue geometry.py already
@@ -865,20 +931,28 @@ def _center_floating_window(hwnd, monitor, position="center", gap=0, width=None,
         )
     except win32gui.error:
         pass
+    return target_left, target_top, target_right, target_bottom
 
 
-def _delayed_center_floating_window(hwnd, monitor, position="center", gap=0, width=None, height=None):
+def _delayed_center_floating_window(hwnd, monitor, position="center", gap=0, width=None, height=None, center_delay=None):
     """Runs on its own one-off background thread (see _add_floating_window)
-    - never the message-loop thread, since this blocks for
-    FLOATING_CENTER_DELAY_SECONDS. A single synchronous (no
-    SWP_ASYNCWINDOWPOS) centering call, issued once after the delay -
-    replaces the initial immediate call entirely rather than adding a
-    second one, since an app's own startup self-repositioning tends to
-    already be done by this point."""
-    time.sleep(FLOATING_CENTER_DELAY_SECONDS)
-    if not win32gui.IsWindow(hwnd):
-        return
-    _center_floating_window(hwnd, monitor, position, gap, width, height)
+    - never the message-loop thread. Re-issues the centering call every
+    FLOATING_CENTER_RETRY_INTERVAL, checking each time whether the window
+    actually landed at the rect _center_floating_window targeted, until it
+    does or center_delay (default FLOATING_CENTER_MAX_WAIT_SECONDS) has
+    elapsed - an app that settles its own startup layout quickly (e.g.
+    Explorer) gets positioned almost immediately instead of always paying
+    the full wait, while one that fights back for longer (e.g. Calculator
+    restoring its last-used position) still gets a bounded number of
+    corrective retries rather than just the one shot this used to be."""
+    deadline = time.monotonic() + (FLOATING_CENTER_MAX_WAIT_SECONDS if center_delay is None else center_delay)
+    while win32gui.IsWindow(hwnd):
+        target = _center_floating_window(hwnd, monitor, position, gap, width, height)
+        if target is not None and geometry.safe_get_window_rect(hwnd) == target:
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(FLOATING_CENTER_RETRY_INTERVAL)
 
 
 def on_window_shown(hwnd):

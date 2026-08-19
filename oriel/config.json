@@ -68,7 +68,8 @@
     },
     "ignore_rules": [
       { "class": ["Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW", "Windows.UI.Core.CoreWindow", "ForegroundStaging", "MultitaskingViewFrame", "TaskListThumbnailWnd", "SysShadow", "tooltips_class32", "#32768", "XamlExplorerHostIslandWindow", "SnagIt9Editor"] },
-      { "process": ["explorer.exe", "taskmgr.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "textinputhost.exe", "systemsettings.exe", "logioverlay.exe", "logioptions.exe", "powertoys.quickaccess.exe", "microsoft.cmdpal.ui.exe", "selfservice.exe"] },
+      { "process": "explorer.exe", "class_not": "CabinetWClass" },
+      { "process": ["taskmgr.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "textinputhost.exe", "systemsettings.exe", "logioverlay.exe", "logioptions.exe", "powertoys.quickaccess.exe", "microsoft.cmdpal.ui.exe", "selfservice.exe"] },
       { "process": ["firefox.exe", "msedge.exe", "chrome.exe"], "class": "#32770" },
       { "process": ["firefox.exe", "msedge.exe", "chrome.exe"], "title_contains": ["save as", "open", "download"] },
       { "process": "excel.exe", "class_not": "XLMAIN" },
@@ -77,13 +78,14 @@
       { "process": "ms-teams.exe", "title_contains": "microsoft teams notification" }
     ],
     "floating_rules": [
-      { "class": "ApplicationFrameWindow", "title": "calculator" },
+      { "process": "explorer.exe", "class": "CabinetWClass" },
+      { "class": "ApplicationFrameWindow", "title": "calculator"},
       { "process": "code.exe", "class": "Chrome_WidgetWin_0" },
       { "class": "ApplicationFrameWindow", "title": "Settings" },
       { "process": "windows365.exe", "class": "MainWindow" },
-      { "process": "ms-teams.exe", "title_contains": "meeting join", "sticky": true, "topmost": true, "position": "bottom-right", "gap": 20, "width": 450, "height": 850 },
-      { "process": "ms-teams.exe", "title_contains": "meeting", "title_not_contains": "join", "sticky": true, "topmost": true, "position": "bottom-right", "gap": 20 },
-      { "process": "ms-teams.exe", "title_contains": "sharing control bar", "sticky": true, "topmost": true, "position": "top", "border": false }
+      { "process": "ms-teams.exe", "title_contains": "meeting join", "sticky": true, "topmost": true, "position": "bottom-right", "gap": 20, "width": 450, "height": 850, "activate": false },
+      { "process": "ms-teams.exe", "title_contains": "meeting", "title_not_contains": "join", "sticky": true, "topmost": true, "position": "bottom-right", "gap": 20, "activate": false },
+      { "process": "ms-teams.exe", "title_contains": "sharing control bar", "sticky": true, "topmost": true, "position": "top", "border": false, "activate": false }
     ]
   },
   "autostart": {
