@@ -184,7 +184,6 @@ def could_become_floating_configured(hwnd):
 
 FLOATING_RULE_DEFAULTS = {
     "sticky": False,
-    "topmost": False,
     "position": "center",
     "border": True,
     "gap": 0,
@@ -204,8 +203,13 @@ def floating_rule_options(hwnd):
     also positioned immediately rather than through the delayed re-center
     non-sticky windows use, since sticky windows are always freshly-
     discovered (never racing an app's own startup self-repositioning the
-    way e.g. Calculator does). "topmost" means HWND_TOPMOST instead of the
-    usual HWND_TOP z-order. "position" is an anchor string ("center"
+    way e.g. Calculator does). Every floating window is always raised via
+    HWND_TOPMOST (see events._raise_floating_window), not just an opt-in -
+    a plain HWND_TOP nudge only wins the top of the normal z-order band
+    for a moment, and a later-tiled or later-focused normal window can
+    freely push it back down; HWND_TOPMOST is a standing OS-level state
+    nothing outside oriel can casually override. "position" is an anchor
+    string ("center"
     (default), "top", "bottom", "left", "right", or a hyphenated
     combination like "bottom-right") consumed by events._anchor_position.
     "gap" is the margin (px) kept from whichever edge(s) "position"
