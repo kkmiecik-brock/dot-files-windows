@@ -29,6 +29,7 @@ ACTIONS = {
     "resize_shrink": lambda _data=None: events.post(events.resize_shrink),
     "reload": lambda _data=None: events.post(events.reload_settings),
     "toggle_fullscreen": lambda _data=None: events.post(events.toggle_fullscreen),
+    "toggle_floating": lambda _data=None: events.post(events.toggle_floating),
     "record_drag_kind": lambda data=None: events.post(events.record_drag_kind, data),
     "reflow": lambda _data=None: events.post(events.reflow_all),
     "switch_workspace": lambda data=None: events.post(events.switch_workspace_action, data),

@@ -5,6 +5,7 @@
     { "modifiers": ["alt"], "key": "B", "target": "hotkeyd", "action": "launch", "args": { "target": "firefox.exe" } },
     { "modifiers": ["alt"], "key": "Q", "target": "hotkeyd", "action": "close_focused" },
     { "modifiers": ["alt"], "key": "F", "target": "tiling", "action": "toggle_fullscreen" },
+    { "modifiers": ["alt"], "key": "V", "target": "tiling", "action": "toggle_floating" },
     { "modifiers": ["alt", "shift"], "key": "H", "target": "tiling", "action": "focus_left" },
     { "modifiers": ["alt", "shift"], "key": "L", "target": "tiling", "action": "focus_right" },
     { "modifiers": ["alt", "shift"], "key": "K", "target": "tiling", "action": "focus_up" },
@@ -58,25 +59,31 @@
       "color": "#cba6f7",
       "corner_style": "rounded"
     },
+    "floating": {
+      "center_on_open": true
+    },
     "workspaces": {
       "Remote_Monitor": 10,
       "AUO6092": 10
     },
     "ignore_rules": [
       { "class": ["Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW", "Windows.UI.Core.CoreWindow", "ForegroundStaging", "MultitaskingViewFrame", "TaskListThumbnailWnd", "SysShadow", "tooltips_class32", "#32768", "XamlExplorerHostIslandWindow", "SnagIt9Editor"] },
-      { "process": ["explorer.exe", "flow.launcher.exe", "taskmgr.exe", "windows365.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "textinputhost.exe", "systemsettings.exe", "logioverlay.exe", "logioptions.exe", "powertoys.quickaccess.exe", "microsoft.cmdpal.ui.exe", "selfservice.exe"] },
-      { "title": "calculator" },
-      { "process": "ms-teams.exe", "title_contains": "microsoft teams notification" },
-      { "process": "code.exe", "class": "Chrome_WidgetWin_0" },
-      { "process": ["msrdc.exe", "windows365.exe"], "class_contains": "credential" },
-      { "process": ["msrdc.exe", "windows365.exe"], "class": "#32770" },
+      { "process": ["explorer.exe", "taskmgr.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "textinputhost.exe", "systemsettings.exe", "logioverlay.exe", "logioptions.exe", "powertoys.quickaccess.exe", "microsoft.cmdpal.ui.exe", "selfservice.exe"] },
       { "process": ["firefox.exe", "msedge.exe", "chrome.exe"], "class": "#32770" },
       { "process": ["firefox.exe", "msedge.exe", "chrome.exe"], "title_contains": ["save as", "open", "download"] },
-      { "process": "firefox.exe", "title": "Picture-in-Picture" },
       { "process": "excel.exe", "class_not": "XLMAIN" },
       { "process": "winword.exe", "class_not": "OpusApp" },
       { "process": "powerpnt.exe", "class_not": "PPTFrameClass" },
-      { "class": "ApplicationFrameWindow", "title": "Settings" }
+      { "process": "ms-teams.exe", "title_contains": "microsoft teams notification" }
+    ],
+    "floating_rules": [
+      { "class": "ApplicationFrameWindow", "title": "calculator" },
+      { "process": "code.exe", "class": "Chrome_WidgetWin_0" },
+      { "class": "ApplicationFrameWindow", "title": "Settings" },
+      { "process": "windows365.exe", "class": "MainWindow" },
+      { "process": "ms-teams.exe", "title_contains": "meeting join", "sticky": true, "topmost": true, "position": "bottom-right", "gap": 20, "width": 450, "height": 850 },
+      { "process": "ms-teams.exe", "title_contains": "meeting", "title_not_contains": "join", "sticky": true, "topmost": true, "position": "bottom-right", "gap": 20 },
+      { "process": "ms-teams.exe", "title_contains": "sharing control bar", "sticky": true, "topmost": true, "position": "top", "border": false }
     ]
   },
   "autostart": {

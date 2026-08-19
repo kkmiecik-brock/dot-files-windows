@@ -30,8 +30,8 @@ from oriel.tiling import geometry
 from oriel.tiling import persistence
 from oriel.tiling import policy
 from oriel.tiling import tree
-from oriel.tiling.filters import could_become_manageable, get_process_name, is_cloaked, is_manageable, load_ignore_rules
-from oriel.tiling.state import DEFAULT_BORDER, DEFAULT_GAP, DEFAULT_OUTER_GAP, DEFAULT_RESIZE_STEP, DEFAULT_WORKSPACE
+from oriel.tiling.filters import could_become_floating_configured, could_become_manageable, floating_rule_options, get_process_name, is_cloaked, is_floating_configured, is_manageable, load_floating_rules, load_ignore_rules
+from oriel.tiling.state import DEFAULT_BORDER, DEFAULT_GAP, DEFAULT_OUTER_GAP, DEFAULT_RESIZE_STEP, DEFAULT_WORKSPACE, DEFAULT_FLOATING
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,17 @@ logger = logging.getLogger(__name__)
 # failing is_manageable() once used to spawn a new OS thread per retry.
 MAX_MANAGEABLE_RETRIES = 5
 RETRY_INTERVAL = 0.15
+
+# Some packaged apps (Calculator, Windows App) restore their own last-used
+# window position shortly after being shown, overwriting a single centering
+# call - see _delayed_center_floating_window.
+FLOATING_CENTER_DELAY_SECONDS = 0.5
+
+# Used instead of tiling.outer_gap when anchor-positioning a floating
+# window (see _center_floating_window) - outer_gap is a tiled-layout
+# spacing setting, not something floating windows should inherit.
+ZERO_OUTER_GAP = {"top": 0, "right": 0, "bottom": 0, "left": 0}
+
 
 # How long a hide/cloak notification has to keep looking real before it's
 # actually acted on (see on_window_hidden/_tick_pending_hides) - live-
@@ -75,6 +86,18 @@ _state = None
 # genuinely be too early. Cleaned up in on_window_destroyed so this can't
 # grow unbounded for windows that are never actually manageable.
 _manageable_retries = {}
+
+# hwnd -> retry count, for windows that already pass is_manageable() (real
+# chrome) but whose process/class matches a floating_rules entry aside
+# from its title (see could_become_floating_configured) - held off from
+# tiling for a few ticks in case a NAMECHANGE reveals the title that rule
+# actually matches, same MANAGEABLE_RETRY_TIMER tick _manageable_retries
+# uses (not a separate timer - see _tick_floating_settle_retries). Without
+# this, a window that gets tiled first and only later renames into a
+# floating_rules match stays tiled forever with no way back to its
+# original (pre-tile-resize) size - confirmed live with Teams' meeting
+# window during the screen-share transition.
+_floating_settle_retries = {}
 
 # process name (lowercased basename, e.g. "ms-teams.exe") -> (workspace,
 # monotonic expiry) - registered by oriel.autostart via IPC right after it
@@ -285,6 +308,21 @@ def _teardown_for_quit():
             win32gui.ShowWindow(hwnd, win32con.SW_SHOWNA)
             _avoid_taskbar_overlap(hwnd, monitor)
 
+    for monitor, workspace in _state.all_floating_monitor_workspaces():
+        for hwnd in list(_state.floating_hwnds(monitor, workspace)):
+            if not win32gui.IsWindow(hwnd):
+                continue
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOWNA)
+            _avoid_taskbar_overlap(hwnd, monitor)
+
+    for hwnd in _state.sticky_hwnds():
+        # Never hidden by us in the first place (sticky windows skip the
+        # (monitor, workspace) hide/show lifecycle entirely - see
+        # _add_floating_window), so just the taskbar-overlap nudge, no
+        # ShowWindow needed.
+        if win32gui.IsWindow(hwnd):
+            _avoid_taskbar_overlap(hwnd, geometry.monitor_of(hwnd))
+
 
 def _avoid_taskbar_overlap(hwnd, monitor):
     """Shrinks/moves hwnd up out from under the taskbar's real screen rect
@@ -341,6 +379,7 @@ def _load_settings():
         "resize_step": tiling.get("resize_step", DEFAULT_RESIZE_STEP),
         "workspaces": tiling.get("workspaces", {}),
         "border": {**DEFAULT_BORDER, **tiling.get("border", {})},
+        "floating": {**DEFAULT_FLOATING, **tiling.get("floating", {})},
     }
 
 
@@ -351,13 +390,15 @@ def apply_initial_settings():
     _state.resize_step = settings["resize_step"]
     _state.workspaces = settings["workspaces"]
     _state.border = settings["border"]
+    _state.floating = settings["floating"]
     load_ignore_rules()
+    load_floating_rules()
 
 
 def reload_settings(_data=None):
-    """Re-reads inner_gap/outer_gap/resize_step/border/ignore_rules from
-    config.json and reflows every monitor immediately so the change is
-    visible right away."""
+    """Re-reads inner_gap/outer_gap/resize_step/border/floating/
+    ignore_rules/floating_rules from config.json and reflows every monitor
+    immediately so the change is visible right away."""
     old_workspaces = _state.workspaces
     settings = _load_settings()
     _state.inner_gap = settings["inner_gap"]
@@ -365,7 +406,9 @@ def reload_settings(_data=None):
     _state.resize_step = settings["resize_step"]
     _state.workspaces = settings["workspaces"]
     _state.border = settings["border"]
+    _state.floating = settings["floating"]
     load_ignore_rules()
+    load_floating_rules()
     _migrate_newly_configured_monitors(old_workspaces)
     _state.reflow_all()
     update_focus_border()
@@ -445,6 +488,23 @@ def update_focus_border():
             monitor, workspace, leaf = _state.find_leaf_any_monitor(fg)
             if leaf is not None and workspace == _state.active_workspace(monitor):
                 highlight = fg
+            else:
+                floating_monitor, floating_workspace = _state.find_floating_any_monitor(fg)
+                if floating_monitor is not None and floating_workspace == _state.active_workspace(floating_monitor):
+                    highlight = fg
+                elif _state.is_sticky(fg):
+                    # Sticky windows have no (monitor, workspace) of their
+                    # own to check against an "active" one - being sticky
+                    # at all is sufficient, since they're visible (and
+                    # therefore focusable) regardless of which workspace
+                    # is currently active.
+                    highlight = fg
+        if highlight is not None and _state.has_no_border(highlight):
+            # Explicit floating_rules "border": false opt-out (see
+            # _add_floating_window) - e.g. a screen-share control bar,
+            # where oriel's usual accent border/corner-rounding looks out
+            # of place on such a small, transient window.
+            highlight = None
 
     color = _hex_to_colorref(_state.border["color"]) if highlight is not None else None
     corner_style = _state.border["corner_style"] if highlight is not None else None
@@ -511,14 +571,48 @@ def bootstrap_existing_windows():
             # else ever re-discovers an already-existing hidden window
             # once bootstrap has skipped it (no new SHOW/UNCLOAKED event
             # is coming for a window that's just sitting there hidden).
-            if is_manageable(hwnd, require_visible=False):
+            if is_floating_configured(hwnd):
+                # Explicit floating_rules match overrides tiling outright,
+                # same priority order as on_window_shown - checked ahead of
+                # is_manageable() so a fully-chromed match (e.g. Windows
+                # App) can't get re-tiled on every restart.
+                options = floating_rule_options(hwnd)
+                if options["sticky"]:
+                    _state.add_sticky(hwnd)
+                else:
+                    _state.add_floating(monitor, hwnd, workspace)
+                    if workspace != _state.active_workspace(monitor) and win32gui.IsWindowVisible(hwnd):
+                        win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+                if not options["border"]:
+                    _state.add_no_border(hwnd)
+            elif is_manageable(hwnd, require_visible=False):
                 _state.insert_hwnd(monitor, hwnd, workspace)
                 if workspace != _state.active_workspace(monitor) and win32gui.IsWindowVisible(hwnd):
                     win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+            elif could_become_manageable(hwnd):
+                # Known history, but not a tileable window (missing chrome/
+                # title, or excluded via ignore_rules) - same floating
+                # re-tracking as the runtime discovery path, just without
+                # re-centering it on every restart.
+                _state.add_floating(monitor, hwnd, workspace)
+                if workspace != _state.active_workspace(monitor) and win32gui.IsWindowVisible(hwnd):
+                    win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+        elif is_floating_configured(hwnd) and win32gui.IsWindowVisible(hwnd):
+            # No persisted history, but an explicit floating_rules match -
+            # same priority-over-tiling as above, fresh discovery so it
+            # goes through the full _add_floating_window path (centering).
+            _add_floating_window(hwnd, monitor)
         elif is_manageable(hwnd):
             # No persisted history anywhere - only a genuinely fresh,
             # currently-visible app window qualifies as a new discovery.
             _state.insert_hwnd(monitor, hwnd, _state.active_workspace(monitor))
+        elif could_become_manageable(hwnd) and win32gui.IsWindowVisible(hwnd):
+            # Never seen before either - a currently-visible real (non-
+            # popup) window that just doesn't qualify for tiling. Goes
+            # through the full _add_floating_window path (including
+            # centering) since it's a fresh discovery, same as the runtime
+            # retry-exhaustion path.
+            _add_floating_window(hwnd, monitor)
     _state.reflow_all()
     update_focus_border()
 
@@ -594,20 +688,272 @@ def register_autostart_window(data):
     _pending_autostart_workspace[process.lower()] = (workspace, now + AUTOSTART_WINDOW_SECONDS)
 
 
+def _add_floating_window(hwnd, monitor=None):
+    """Tracks hwnd as a floating (non-tiled) window - assigned a workspace
+    so it hides/shows with workspace switches exactly like a tiled window
+    (see switch_workspace/_tick_pending_hides/on_window_destroyed), but
+    never inserted into the tiling tree and never affects other windows'
+    rects. For windows that structurally can't be tiled (missing chrome/
+    title) or are deliberately excluded via ignore_rules (e.g. Settings/
+    Calculator/credential dialogs) - previously these got no workspace/
+    hide-show lifecycle or focus border at all, staying visible regardless
+    of which workspace was active. Kept above tiled windows in Z-order and
+    optionally centered on its monitor's work area (config.json's
+    tiling.floating.center_on_open).
+
+    A tiling.floating_rules match with "sticky": true (see
+    filters.floating_rule_options) skips the (monitor, workspace)-scoped
+    floating lifecycle entirely and goes to TilingState.add_sticky instead
+    - for windows that belong to no single workspace at all (e.g. a Teams
+    meeting window, which Teams recreates as a brand-new hwnd on every
+    view-mode toggle, scattering "the same meeting" across whatever
+    workspace happened to be active at each toggle - see switch_workspace's
+    hide/show loops, which only ever touch _state.floating_hwnds, never
+    sticky ones, so these are simply never hidden by a workspace switch).
+    "topmost": true additionally uses HWND_TOPMOST instead of HWND_TOP, so
+    it stays above other windows persistently, not just once at open.
+    "position" (default "center") picks where on the work area it lands
+    when center_on_open is true - see _anchor_position for accepted
+    values (e.g. "top", "bottom-right"). "gap" (default 0) is the margin
+    kept from whichever edge(s) "position" anchors against. "width"/
+    "height" (default None = leave as-is) force a specific visible size
+    instead of just repositioning it. "border": false skips corner-
+    rounding and focus-border eligibility entirely (see TilingState.
+    add_no_border/update_focus_border) - for small/transient windows (e.g.
+    a screen-share control bar) where oriel's usual per-window chrome
+    looks out of place."""
+    if monitor is None:
+        monitor = geometry.monitor_at_cursor()
+    options = floating_rule_options(hwnd)
+    if options["sticky"]:
+        _state.add_sticky(hwnd)
+    else:
+        workspace = _state.active_workspace(monitor)
+        _state.add_floating(monitor, hwnd, workspace)
+    if not options["border"]:
+        _state.add_no_border(hwnd)
+    if win32gui.IsWindow(hwnd):
+        if options["border"]:
+            threading.Thread(target=border.ensure_rounded, args=(hwnd,), daemon=True).start()
+        if _state.floating.get("center_on_open", False):
+            center_args = (hwnd, monitor, options["position"], options["gap"], options["width"], options["height"])
+            if options["sticky"]:
+                # Sticky windows are always a freshly-discovered hwnd (a
+                # brand-new Teams meeting/screen-share window, never an
+                # already-open one being reclassified), so there's no
+                # app-restores-its-own-position race to wait out the way
+                # e.g. Calculator has - position it immediately instead of
+                # through the delayed re-center below. That immediacy means
+                # frame_margins may not have been queried for this hwnd yet
+                # at all - invalidate any stale/early cache entry so
+                # expand_rect_for_frame (inside _center_floating_window)
+                # re-queries DWM's real extended frame bounds instead of a
+                # snapshot taken before the window had settled.
+                geometry.invalidate_frame_margins(hwnd)
+                threading.Thread(target=_center_floating_window, args=center_args, daemon=True).start()
+                if options["width"] is not None or options["height"] is not None:
+                    # A forced size specifically races the app's own
+                    # content-driven layout in a way plain repositioning
+                    # doesn't (observed: Teams' WebView re-asserting its
+                    # own preferred size shortly after creation, undoing an
+                    # immediate too-small resize) - one extra delayed
+                    # re-assertion (same settle delay as the non-sticky
+                    # path below, not a new timer) catches that without
+                    # giving up the instant initial placement above.
+                    threading.Thread(target=_delayed_center_floating_window, args=center_args, daemon=True).start()
+            else:
+                threading.Thread(target=_delayed_center_floating_window, args=center_args, daemon=True).start()
+        try:
+            win32gui.SetWindowPos(
+                hwnd, win32con.HWND_TOPMOST if options["topmost"] else win32con.HWND_TOP, 0, 0, 0, 0,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_ASYNCWINDOWPOS,
+            )
+        except win32gui.error:
+            pass
+    _persist_workspace_state(monitor)
+    update_focus_border()
+
+
+def _normalize_gap(gap):
+    """A floating_rules "gap" value is either a single number (applied to
+    all four edges) or a dict like tiling.outer_gap's - normalizes either
+    form to a (top, right, bottom, left) tuple."""
+    if isinstance(gap, dict):
+        return gap.get("top", 0), gap.get("right", 0), gap.get("bottom", 0), gap.get("left", 0)
+    return gap, gap, gap, gap
+
+
+def _anchor_position(position, area, width, height, gap=0):
+    """Resolves a floating_rules "position" string (e.g. "center",
+    "top", "bottom-right") to a (left, top) point within `area` for a
+    window of the given size - each of the two axes is independently
+    center/min/max, so any hyphenated combination of a vertical
+    (top/bottom) and horizontal (left/right) keyword works, defaulting to
+    center on whichever axis isn't mentioned. `gap` insets whichever
+    edge(s) are actually anchored against - it has no effect on an axis
+    left centered, since there's no single edge to keep a margin from."""
+    area_left, area_top, area_right, area_bottom = area
+    gap_top, gap_right, gap_bottom, gap_left = _normalize_gap(gap)
+    keywords = position.lower().split("-")
+    if "top" in keywords:
+        top = area_top + gap_top
+    elif "bottom" in keywords:
+        top = area_bottom - height - gap_bottom
+    else:
+        top = area_top + max(0, ((area_bottom - area_top) - height) // 2)
+    if "left" in keywords:
+        left = area_left + gap_left
+    elif "right" in keywords:
+        left = area_right - width - gap_right
+    else:
+        left = area_left + max(0, ((area_right - area_left) - width) // 2)
+    return left, top
+
+
+def _center_floating_window(hwnd, monitor, position="center", gap=0, width=None, height=None):
+    rect = geometry.safe_get_window_rect(hwnd)
+    if rect is None:
+        return
+    # GetWindowRect includes the invisible DWM resize/shadow border, so
+    # centering on it directly leaves the *visible* frame off-center by
+    # whatever that border's margins are - same issue geometry.py already
+    # compensates for on the tiled path (see expand_rect_for_frame).
+    left, top, right, bottom = geometry.shrink_rect_for_frame(rect, hwnd)
+    current_width, current_height = right - left, bottom - top
+    target_width = width if width is not None else current_width
+    target_height = height if height is not None else current_height
+    resizing = width is not None or height is not None
+    if resizing:
+        # Some apps (observed: Teams' compact meeting view while sharing)
+        # enforce their own minimum tracking size and silently clamp a
+        # too-small SetWindowPos request instead of honoring it - resize
+        # first, then re-read what size the window actually ended up at,
+        # so the anchor position below is computed against reality instead
+        # of the (possibly rejected) ask, which otherwise leaves it
+        # anchored as if it were the requested size while it's actually
+        # bigger, overflowing past the intended edge/gap.
+        try:
+            win32gui.SetWindowPos(
+                hwnd, 0, 0, 0, target_width, target_height,
+                win32con.SWP_NOMOVE | win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE,
+            )
+        except win32gui.error:
+            pass
+        actual_rect = geometry.safe_get_window_rect(hwnd)
+        if actual_rect is not None:
+            a_left, a_top, a_right, a_bottom = geometry.shrink_rect_for_frame(actual_rect, hwnd)
+            target_width, target_height = a_right - a_left, a_bottom - a_top
+    # Deliberately NOT _state.work_area(monitor) - tiling.outer_gap is a
+    # tiled-layout spacing concept, and floating windows (this anchor
+    # positioning) aren't part of that layout at all, so they anchor flush
+    # against the real usable area (monitor bounds minus taskbar only),
+    # inset only by this rule's own "gap" if any.
+    area = geometry.work_area(monitor, ZERO_OUTER_GAP)
+    new_left, new_top = _anchor_position(position, area, target_width, target_height, gap)
+    target_left, target_top, target_right, target_bottom = geometry.expand_rect_for_frame(
+        (new_left, new_top, new_left + target_width, new_top + target_height), hwnd
+    )
+    flags = win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE
+    if not resizing:
+        flags |= win32con.SWP_NOSIZE
+    try:
+        win32gui.SetWindowPos(
+            hwnd, 0, target_left, target_top,
+            target_right - target_left if resizing else 0,
+            target_bottom - target_top if resizing else 0,
+            flags,
+        )
+    except win32gui.error:
+        pass
+
+
+def _delayed_center_floating_window(hwnd, monitor, position="center", gap=0, width=None, height=None):
+    """Runs on its own one-off background thread (see _add_floating_window)
+    - never the message-loop thread, since this blocks for
+    FLOATING_CENTER_DELAY_SECONDS. A single synchronous (no
+    SWP_ASYNCWINDOWPOS) centering call, issued once after the delay -
+    replaces the initial immediate call entirely rather than adding a
+    second one, since an app's own startup self-repositioning tends to
+    already be done by this point."""
+    time.sleep(FLOATING_CENTER_DELAY_SECONDS)
+    if not win32gui.IsWindow(hwnd):
+        return
+    _center_floating_window(hwnd, monitor, position, gap, width, height)
+
+
 def on_window_shown(hwnd):
+    if win32gui.GetParent(hwnd):
+        # A genuine top-level window never has a parent (an owned window
+        # uses GW_OWNER, not GetParent) - a non-zero parent means this is a
+        # child object that merely fires its own WinEvents, e.g. WinUI/
+        # UWP's Windows.UI.Core.CoreWindow living inside an
+        # ApplicationFrameWindow frame and sharing its exact title.
+        # Confirmed live: an unscoped floating_rules title match caught
+        # exactly this for Calculator, and SetWindowPos-ing a child with
+        # screen coordinates corrupts its position (child coordinates are
+        # relative to the PARENT's client area, not the screen), breaking
+        # its rendering. Bails out here specifically because
+        # is_floating_configured below has no other structural validation
+        # at all (unlike is_manageable, which at least checks chrome/
+        # ownership) - a badly-scoped rule shouldn't be able to reach it.
+        return
     _monitor, _workspace, existing = _state.find_leaf_any_monitor(hwnd)
     if existing is not None:
+        if is_floating_configured(hwnd):
+            # Already tiled, but its identity now matches floating_rules -
+            # confirmed live with Teams' compact meeting window: it can
+            # pass is_manageable() and get tiled on its very first SHOW
+            # (before Teams has renamed it), then fire NAMECHANGE moments
+            # later with the title floating_rules actually matches. Without
+            # this, that NAMECHANGE would just hit the early-return above
+            # forever - once tiled, always tiled - so this migrates it out
+            # the same way toggle_floating's tiled->floating branch does.
+            next_focus = _closest_sibling_leaf(existing)
+            _state.remove_leaf(_monitor, existing, _workspace)
+            _state.reflow(_monitor, _workspace)
+            if next_focus is not None:
+                _state.set_focused_leaf(_monitor, next_focus, _workspace)
+            _add_floating_window(hwnd, _monitor)
+        return
+    floating_monitor, _floating_workspace = _state.find_floating_any_monitor(hwnd)
+    if floating_monitor is not None:
+        return
+    if _state.is_sticky(hwnd):
+        return
+    if is_floating_configured(hwnd):
+        # Explicit tiling.floating_rules match takes priority over tiling
+        # outright, even for windows that would otherwise pass
+        # is_manageable() cleanly (e.g. Windows App's fully-chromed
+        # MainWindow) - checked ahead of the is_manageable() gate below so
+        # it can't ever get tiled first.
+        _floating_settle_retries.pop(hwnd, None)
+        _add_floating_window(hwnd)
         return
     if not is_manageable(hwnd):
         # Popups/tool-windows/owned-helpers (e.g. WinUI XAML popup hosts and
-        # composition bridges behind autocomplete/IME suggestion UI) never
-        # pass is_manageable() no matter how many times you check - retrying
-        # those flooded this exact path (dozens of hwnds deep) while typing.
-        # Only genuinely-initializing app windows (the Firefox timing
-        # gotcha) are worth retrying - see _tick_manageable_retries for how.
-        if could_become_manageable(hwnd):
-            _manageable_retries.setdefault(hwnd, 0)
+        # composition bridges behind autocomplete/IME suggestion UI), or an
+        # explicit tiling.ignore_rules match, never pass is_manageable() no
+        # matter how many times you check - retrying those flooded this
+        # exact path (dozens of hwnds deep) while typing. Only genuinely-
+        # initializing app windows (the Firefox timing gotcha) are worth
+        # retrying - see _tick_manageable_retries for how.
+        if not could_become_manageable(hwnd):
+            return
+        _manageable_retries.setdefault(hwnd, 0)
         return
+    if could_become_floating_configured(hwnd):
+        # Passes is_manageable() (real chrome) right now, but its process/
+        # class matches a floating_rules entry whose title criteria isn't
+        # satisfied YET - give it a few ticks in case a NAMECHANGE renames
+        # it into a match (see _tick_floating_settle_retries) before ever
+        # committing to tiling. Bounded the same way _manageable_retries
+        # is: on exhaustion, whatever it currently is just proceeds
+        # through the normal tiling path below.
+        count = _floating_settle_retries.get(hwnd, 0)
+        if count < MAX_MANAGEABLE_RETRIES:
+            _floating_settle_retries[hwnd] = count + 1
+            return
+        _floating_settle_retries.pop(hwnd, None)
     _manageable_retries.pop(hwnd, None)
     # One-off background thread, not the persistent _border_worker/queue -
     # unlike focus changes (high-frequency, hence that whole coalescing
@@ -678,10 +1024,37 @@ def _tick_manageable_retries():
     forever - verified this actually happens live, not just hypothetically."""
     for hwnd in list(_manageable_retries):
         count = _manageable_retries.get(hwnd, 0)
-        if not win32gui.IsWindow(hwnd) or count >= MAX_MANAGEABLE_RETRIES:
+        if not win32gui.IsWindow(hwnd):
             _manageable_retries.pop(hwnd, None)
             continue
+        if count >= MAX_MANAGEABLE_RETRIES:
+            _manageable_retries.pop(hwnd, None)
+            # Never became a full tiled window across every retry - most
+            # likely a legitimate dialog/utility window that structurally
+            # can't be tiled (missing chrome/title) or is deliberately
+            # excluded via ignore_rules, not a real app still initializing
+            # (that case would have succeeded within the retries above).
+            # Track it as floating instead of abandoning it outright, so it
+            # still gets a workspace/hide-show lifecycle and focus border.
+            if could_become_manageable(hwnd):
+                _add_floating_window(hwnd)
+            continue
         _manageable_retries[hwnd] = count + 1
+        on_window_shown(hwnd)
+
+
+def _tick_floating_settle_retries():
+    """Runs on every MANAGEABLE_RETRY_TIMER tick (see run_message_loop) -
+    the SAME shared timer _tick_manageable_retries uses, not a separate
+    one. See _floating_settle_retries for why this exists. Retry counting
+    and exhaustion both happen inside on_window_shown itself (mirroring
+    how count is tracked for _manageable_retries) - this just re-invokes
+    it for every hwnd still waiting to see if it settles into a
+    floating_rules match."""
+    for hwnd in list(_floating_settle_retries):
+        if not win32gui.IsWindow(hwnd):
+            _floating_settle_retries.pop(hwnd, None)
+            continue
         on_window_shown(hwnd)
 
 
@@ -807,11 +1180,21 @@ def _unmanage(monitor, workspace, leaf):
 
 def on_window_destroyed(hwnd):
     _manageable_retries.pop(hwnd, None)
+    _floating_settle_retries.pop(hwnd, None)
     _active_gestures.discard(hwnd)
     _enforce_attempt_times.pop(hwnd, None)
     _pending_repaint_nudges.discard(hwnd)
     _margin_revalidated.discard(hwnd)
     _pending_hides.pop(hwnd, None)
+    _state.remove_no_border(hwnd)
+    if _state.remove_sticky(hwnd):
+        if hwnd == _bordered_hwnd:
+            update_focus_border()
+        return
+    if _state.remove_floating(hwnd):
+        if hwnd == _bordered_hwnd:
+            update_focus_border()
+        return
     monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None:
         return
@@ -840,7 +1223,9 @@ def on_window_hidden(hwnd):
         return
     monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None:
-        return
+        monitor, workspace = _state.find_floating_any_monitor(hwnd)
+        if monitor is None:
+            return
     if workspace != _state.active_workspace(monitor):
         return  # hidden because its workspace isn't active right now - our own switch-away, not a real hide
     _pending_hides[hwnd] = time.monotonic()
@@ -861,11 +1246,17 @@ def _tick_pending_hides():
         if win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd) and not is_cloaked(hwnd):
             continue  # came back within the debounce window - never really left
         monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
-        if leaf is None:
+        if leaf is not None:
+            if workspace != _state.active_workspace(monitor):
+                continue
+            _unmanage(monitor, workspace, leaf)
             continue
-        if workspace != _state.active_workspace(monitor):
+        monitor, workspace = _state.find_floating_any_monitor(hwnd)
+        if monitor is None or workspace != _state.active_workspace(monitor):
             continue
-        _unmanage(monitor, workspace, leaf)
+        _state.remove_floating(hwnd)
+        if hwnd == _bordered_hwnd:
+            update_focus_border()
 
 
 # --- Focus / move / resize hotkey commands ------------------------------------
@@ -984,6 +1375,44 @@ def toggle_fullscreen(_data=None):
     update_focus_border()
 
 
+def toggle_floating(_data=None):
+    """Alt+V - manually moves the focused window between tiled and floating
+    on its own monitor/workspace, without closing or refocusing it (unlike
+    _unmanage, the window itself never goes away, so there's no sibling-
+    focus handoff to do - it just keeps whatever OS focus it already had)."""
+    hwnd = win32gui.GetForegroundWindow()
+    if not hwnd:
+        return
+    monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
+    if leaf is not None:
+        # Same "who takes over this tile" logic _unmanage uses, but only
+        # for tiling's own internal bookkeeping (compute BEFORE removal) -
+        # OS focus stays on hwnd itself, now floating.
+        next_focus = _closest_sibling_leaf(leaf)
+        _state.remove_leaf(monitor, leaf, workspace)
+        _state.reflow(monitor, workspace)
+        if next_focus is not None:
+            _state.set_focused_leaf(monitor, next_focus, workspace)
+        _state.add_floating(monitor, hwnd, workspace)
+        threading.Thread(target=border.ensure_rounded, args=(hwnd,), daemon=True).start()
+        try:
+            win32gui.SetWindowPos(
+                hwnd, win32con.HWND_TOP, 0, 0, 0, 0,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_ASYNCWINDOWPOS,
+            )
+        except win32gui.error:
+            pass
+    else:
+        monitor, workspace = _state.find_floating_any_monitor(hwnd)
+        if monitor is None:
+            return
+        _state.remove_floating(hwnd)
+        _state.insert_hwnd(monitor, hwnd, workspace)
+        _state.reflow(monitor, workspace)
+    _persist_workspace_state(monitor)
+    update_focus_border()
+
+
 # --- Workspaces ----------------------------------------------------------------
 
 def _persist_workspace_state(monitor):
@@ -1000,6 +1429,31 @@ def _monitor_for_workspace_switch():
     return geometry.monitor_at_cursor()
 
 
+def _capture_zorder(hwnds):
+    """Returns the subset of `hwnds` currently on screen, ordered topmost
+    first - via one EnumWindows scan, which itself enumerates top-level
+    windows in real Z-order (not a per-window property query, just a
+    membership check per hwnd, so this is cheap even scanning every
+    desktop window). Used by switch_workspace to snapshot a workspace's
+    real stacking order right before hiding it, so switching back later
+    can restore it instead of resetting to tree/set-iteration order."""
+    wanted = set(hwnds)
+    order = []
+
+    def callback(hwnd, _):
+        if hwnd in wanted:
+            order.append(hwnd)
+        return True
+
+    win32gui.EnumWindows(callback, None)
+    return order
+
+
+# (monitor, workspace) -> [hwnd, ...] topmost first, captured by
+# switch_workspace right before hiding that workspace - see _capture_zorder.
+_workspace_zorder = {}
+
+
 def switch_workspace(monitor, target_workspace):
     """Hides every window on monitor's currently active workspace and shows
     target_workspace's, without touching tree structure at all - a
@@ -1009,9 +1463,16 @@ def switch_workspace(monitor, target_workspace):
     if target_workspace == current_workspace or target_workspace > _state.workspace_count(monitor):
         return
 
+    current_hwnds = [leaf.item for leaf in tree.all_leaves(_state.root(monitor, current_workspace))]
+    current_hwnds += list(_state.floating_hwnds(monitor, current_workspace))
+    _workspace_zorder[(monitor, current_workspace)] = _capture_zorder(current_hwnds)
+
     for leaf in tree.all_leaves(_state.root(monitor, current_workspace)):
         if win32gui.IsWindow(leaf.item):
             win32gui.ShowWindow(leaf.item, win32con.SW_HIDE)
+    for hwnd in list(_state.floating_hwnds(monitor, current_workspace)):
+        if win32gui.IsWindow(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
 
     _state.set_active_workspace(monitor, target_workspace)
 
@@ -1019,10 +1480,56 @@ def switch_workspace(monitor, target_workspace):
         if win32gui.IsWindow(leaf.item):
             win32gui.ShowWindow(leaf.item, win32con.SW_SHOWNA)
     _state.reflow(monitor, target_workspace)
+    for hwnd in list(_state.floating_hwnds(monitor, target_workspace)):
+        if win32gui.IsWindow(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOWNA)
 
-    focused = _state.focused_leaf(monitor, target_workspace)
-    if focused is not None and win32gui.IsWindow(focused.item):
-        _force_foreground(focused.item)
+    # Restore this workspace's last-known relative stacking order (bottom-
+    # most first, so each subsequent HWND_TOP layers on top of the one
+    # before it, ending with whatever was topmost before back on top) -
+    # without this, tiled windows always come back in tree order and
+    # floating windows in arbitrary set-iteration order, silently
+    # reshuffling every switch. Falls back to whatever ShowWindow just
+    # left them at if this workspace has never been switched away from
+    # before (nothing captured yet).
+    #
+    # Deliberately NOT SWP_ASYNCWINDOWPOS here, unlike nearly every other
+    # SetWindowPos call in this module - an async Z-order change is only
+    # POSTED to the target window's own thread's queue, not applied
+    # immediately, and different windows belong to different threads/
+    # processes with no ordering guarantee between them. Issuing these
+    # async scrambled the intended bottom-to-top sequence in practice
+    # (confirmed live: floating windows ended up behind tiled ones after a
+    # switch). switch_workspace only runs on an explicit hotkey press, not
+    # a hot/frequent path, so a synchronous call here is an acceptable,
+    # deliberate exception to the "always async" rule - see reflow()'s own
+    # comment for why that rule exists elsewhere.
+    for hwnd in reversed(_workspace_zorder.get((monitor, target_workspace), [])):
+        if win32gui.IsWindow(hwnd):
+            try:
+                win32gui.SetWindowPos(
+                    hwnd, win32con.HWND_TOP, 0, 0, 0, 0,
+                    win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE,
+                )
+            except win32gui.error:
+                pass
+
+    # Whichever window was topmost when this workspace was last left (see
+    # _capture_zorder, captured before hiding) should get real OS focus
+    # back too - _state.focused_leaf only ever tracks a TILED leaf
+    # (floating hwnds are plain tracked hwnds, never tree Leaf objects), so
+    # unconditionally using it here always force-focuses a tiled window
+    # even when a floating one was actually topmost/focused before,
+    # undoing the z-order restore above via _force_foreground's own
+    # BringWindowToTop. Falls back to focused_leaf only the first time
+    # this workspace is ever switched to (nothing captured yet).
+    saved_order = _workspace_zorder.get((monitor, target_workspace), [])
+    to_focus = saved_order[0] if saved_order else None
+    if to_focus is None:
+        focused = _state.focused_leaf(monitor, target_workspace)
+        to_focus = focused.item if focused is not None else None
+    if to_focus is not None and win32gui.IsWindow(to_focus):
+        _force_foreground(to_focus)
 
     _persist_workspace_state(monitor)
     update_focus_border()
@@ -1266,6 +1773,7 @@ def run_message_loop():
                 continue
             if msg.message == WM_TIMER and msg.wParam == manageable_retry_timer_id:
                 _tick_manageable_retries()
+                _tick_floating_settle_retries()
                 _tick_repaint_nudges()
                 _tick_pending_hides()
                 _tick_focus_border()

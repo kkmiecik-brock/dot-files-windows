@@ -210,7 +210,7 @@ def _update_drag(x, y):
     if drag_button == "move":
         win32gui.SetWindowPos(
             hwnd, 0, win_x + dx, win_y + dy, 0, 0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
         )
     else:
         min_size = settings["min_size"]
@@ -231,7 +231,7 @@ def _update_drag(x, y):
 
         win32gui.SetWindowPos(
             hwnd, 0, new_left, new_top, new_w, new_h,
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            SWP_NOZORDER | SWP_NOACTIVATE,
         )
 
 

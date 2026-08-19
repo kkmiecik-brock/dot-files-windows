@@ -23,6 +23,7 @@ DEFAULT_GAP = 8
 DEFAULT_OUTER_GAP = {"top": 0, "right": 0, "bottom": 0, "left": 0}
 DEFAULT_RESIZE_STEP = 0.05
 DEFAULT_BORDER = {"enabled": True, "color": "#cba6f7", "corner_style": "rounded"}
+DEFAULT_FLOATING = {"center_on_open": False}
 
 
 class TilingState:
@@ -31,6 +32,27 @@ class TilingState:
         self._focused_leaf = {}
         self._fullscreen_leaf = {}
         self._active_workspace = {}
+        # (monitor, workspace) -> set of hwnd, for windows that aren't part
+        # of the tiling tree at all (structurally can't be tiled, or
+        # deliberately excluded via ignore_rules) but still get a
+        # workspace/hide-show lifecycle like tiled windows do - see
+        # events._add_floating_window.
+        self._floating = {}
+        # hwnd -> True, for floating windows explicitly marked "sticky" in
+        # config.json's tiling.floating_rules - unlike _floating (keyed by
+        # (monitor, workspace), hidden/shown on every switch_workspace),
+        # these are workspace-independent: always visible, never hidden,
+        # not tied to any single (monitor, workspace) at all. Kept as its
+        # own flat set rather than a magic workspace value, so every other
+        # method that iterates _floating by key never needs to special-
+        # case it.
+        self._sticky = set()
+        # hwnd -> True, for windows whose tiling.floating_rules match sets
+        # "border": false - opts out of both corner-rounding and focus-
+        # border highlighting entirely (see events.update_focus_border/
+        # _add_floating_window), for windows where oriel's usual per-window
+        # chrome looks out of place (e.g. a small screen-share control bar).
+        self._no_border = set()
         # hwnd -> last (left, top, right, bottom) actually requested via
         # SetWindowPos, frame-expanded - lets reflow() skip re-issuing an
         # identical request to a leaf nothing changed for, instead of
@@ -43,6 +65,7 @@ class TilingState:
         self.outer_gap = DEFAULT_OUTER_GAP
         self.resize_step = DEFAULT_RESIZE_STEP
         self.border = DEFAULT_BORDER
+        self.floating = DEFAULT_FLOATING
         self.workspaces = {}  # stable monitor id -> configured workspace count
 
     def reset(self):
@@ -56,6 +79,9 @@ class TilingState:
         self._fullscreen_leaf = {}
         self._active_workspace = {}
         self._last_requested_rect = {}
+        self._floating = {}
+        self._sticky = set()
+        self._no_border = set()
 
     @staticmethod
     def _key(monitor, workspace=DEFAULT_WORKSPACE):
@@ -112,6 +138,58 @@ class TilingState:
         which un-hides everything, not just the active workspace)."""
         return list(self._roots.keys())
 
+    def floating_hwnds(self, monitor, workspace=DEFAULT_WORKSPACE):
+        return self._floating.get(self._key(monitor, workspace), set())
+
+    def add_floating(self, monitor, hwnd, workspace=DEFAULT_WORKSPACE):
+        self._floating.setdefault(self._key(monitor, workspace), set()).add(hwnd)
+
+    def remove_floating(self, hwnd):
+        """Removes hwnd from wherever it's floating-tracked, if anywhere.
+        Returns whether it was found."""
+        for hwnds in self._floating.values():
+            if hwnd in hwnds:
+                hwnds.discard(hwnd)
+                return True
+        return False
+
+    def find_floating_any_monitor(self, hwnd):
+        """Returns (monitor, workspace), or (None, None)."""
+        for (monitor, workspace), hwnds in self._floating.items():
+            if hwnd in hwnds:
+                return monitor, workspace
+        return None, None
+
+    def all_floating_monitor_workspaces(self):
+        """Every (monitor, workspace) pair with at least one floating
+        window - mirrors all_monitor_workspaces for the floating set."""
+        return list(self._floating.keys())
+
+    def add_sticky(self, hwnd):
+        self._sticky.add(hwnd)
+
+    def remove_sticky(self, hwnd):
+        """Returns whether hwnd was sticky-tracked."""
+        if hwnd in self._sticky:
+            self._sticky.discard(hwnd)
+            return True
+        return False
+
+    def is_sticky(self, hwnd):
+        return hwnd in self._sticky
+
+    def sticky_hwnds(self):
+        return list(self._sticky)
+
+    def add_no_border(self, hwnd):
+        self._no_border.add(hwnd)
+
+    def remove_no_border(self, hwnd):
+        self._no_border.discard(hwnd)
+
+    def has_no_border(self, hwnd):
+        return hwnd in self._no_border
+
     def migrate_workspace(self, monitor, from_workspace, to_workspace):
         """Re-keys everything under (monitor, from_workspace) to (monitor,
         to_workspace) - for a monitor whose workspace config just went from
@@ -120,13 +198,14 @@ class TilingState:
         internal bookkeeping - windows stay exactly as visible/hidden as
         they already were."""
         from_key, to_key = self._key(monitor, from_workspace), self._key(monitor, to_workspace)
-        if from_key not in self._roots:
-            return
-        self._roots[to_key] = self._roots.pop(from_key)
-        if from_key in self._focused_leaf:
-            self._focused_leaf[to_key] = self._focused_leaf.pop(from_key)
-        if from_key in self._fullscreen_leaf:
-            self._fullscreen_leaf[to_key] = self._fullscreen_leaf.pop(from_key)
+        if from_key in self._roots:
+            self._roots[to_key] = self._roots.pop(from_key)
+            if from_key in self._focused_leaf:
+                self._focused_leaf[to_key] = self._focused_leaf.pop(from_key)
+            if from_key in self._fullscreen_leaf:
+                self._fullscreen_leaf[to_key] = self._fullscreen_leaf.pop(from_key)
+        if from_key in self._floating:
+            self._floating[to_key] = self._floating.pop(from_key)
 
     def work_area(self, monitor):
         return geometry.work_area(monitor, self.outer_gap)
@@ -173,14 +252,20 @@ class TilingState:
         self._last_requested_rect.pop(hwnd, None)
 
     def hwnd_workspaces(self, monitor):
-        """{hwnd: workspace} for every hwnd currently tiled anywhere on
-        `monitor` (across all its workspaces) - used for persistence."""
+        """{hwnd: workspace} for every hwnd currently tiled OR floating
+        anywhere on `monitor` (across all its workspaces) - used for
+        persistence."""
         result = {}
         for (mon, workspace), root in self._roots.items():
             if mon != monitor:
                 continue
             for leaf in tree.all_leaves(root):
                 result[leaf.item] = workspace
+        for (mon, workspace), hwnds in self._floating.items():
+            if mon != monitor:
+                continue
+            for hwnd in hwnds:
+                result[hwnd] = workspace
         return result
 
     def reflow(self, monitor, workspace=DEFAULT_WORKSPACE):
