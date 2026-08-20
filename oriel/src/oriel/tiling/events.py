@@ -31,7 +31,7 @@ from oriel.tiling import persistence
 from oriel.tiling import policy
 from oriel.tiling import tree
 from oriel.tiling.filters import could_become_floating_configured, could_become_manageable, floating_rule_options, get_process_name, is_cloaked, is_floating_configured, is_manageable, load_floating_rules, load_ignore_rules
-from oriel.tiling.state import DEFAULT_BORDER, DEFAULT_GAP, DEFAULT_OUTER_GAP, DEFAULT_RESIZE_STEP, DEFAULT_WORKSPACE, DEFAULT_FLOATING
+from oriel.tiling.state import DEFAULT_BORDER, DEFAULT_GAP, DEFAULT_OUTER_GAP, DEFAULT_RESIZE_STEP, DEFAULT_WORKSPACE, DEFAULT_FLOATING, DEFAULT_WORKSPACE_TOGGLE_BACK
 
 logger = logging.getLogger(__name__)
 
@@ -401,6 +401,7 @@ def _load_settings():
         "workspaces": tiling.get("workspaces", {}),
         "border": {**DEFAULT_BORDER, **tiling.get("border", {})},
         "floating": {**DEFAULT_FLOATING, **tiling.get("floating", {})},
+        "workspace_toggle_back": tiling.get("workspace_toggle_back", DEFAULT_WORKSPACE_TOGGLE_BACK),
     }
 
 
@@ -412,6 +413,7 @@ def apply_initial_settings():
     _state.workspaces = settings["workspaces"]
     _state.border = settings["border"]
     _state.floating = settings["floating"]
+    _state.workspace_toggle_back = settings["workspace_toggle_back"]
     load_ignore_rules()
     load_floating_rules()
 
@@ -428,6 +430,7 @@ def reload_settings(_data=None):
     _state.workspaces = settings["workspaces"]
     _state.border = settings["border"]
     _state.floating = settings["floating"]
+    _state.workspace_toggle_back = settings["workspace_toggle_back"]
     load_ignore_rules()
     load_floating_rules()
     _migrate_newly_configured_monitors(old_workspaces)
@@ -1603,6 +1606,14 @@ def _capture_zorder(hwnds):
 # switch_workspace right before hiding that workspace - see _capture_zorder.
 _workspace_zorder = {}
 
+# monitor -> workspace switched away FROM last, for switch_workspace's
+# optional "pressing the current workspace's own key again returns to
+# whatever workspace you were on before" behavior (tiling.
+# workspace_toggle_back) - updated on every actual switch, including a
+# toggle-back itself, so pressing the same key repeatedly just alternates
+# between the two workspaces.
+_previous_workspace = {}
+
 
 def switch_workspace(monitor, target_workspace):
     """Hides every window on monitor's currently active workspace and shows
@@ -1610,8 +1621,15 @@ def switch_workspace(monitor, target_workspace):
     workspace switch is a visibility change, not a hide/destroy, so each
     workspace's layout survives switching away from it untouched."""
     current_workspace = _state.active_workspace(monitor)
-    if target_workspace == current_workspace or target_workspace > _state.workspace_count(monitor):
+    if target_workspace == current_workspace:
+        if not _state.workspace_toggle_back:
+            return
+        target_workspace = _previous_workspace.get(monitor)
+        if target_workspace is None or target_workspace == current_workspace:
+            return
+    if target_workspace > _state.workspace_count(monitor):
         return
+    _previous_workspace[monitor] = current_workspace
 
     current_hwnds = [leaf.item for leaf in tree.all_leaves(_state.root(monitor, current_workspace))]
     current_hwnds += list(_state.floating_hwnds(monitor, current_workspace))
@@ -1692,9 +1710,11 @@ def switch_workspace_action(data):
 
 
 def move_to_workspace(target_workspace):
-    """Reassigns the focused window to target_workspace on its own monitor.
-    The view stays on the current workspace - the window just disappears,
-    matching i3's default "move, don't follow" behavior."""
+    """Reassigns the focused window to target_workspace on its own
+    monitor, then switches that monitor's view to target_workspace too -
+    you follow the window instead of it just disappearing (i3's default
+    "move, don't follow" behavior, which this used to match, wasn't
+    wanted here)."""
     hwnd = win32gui.GetForegroundWindow()
     if not hwnd:
         return
@@ -1703,13 +1723,21 @@ def move_to_workspace(target_workspace):
         return
 
     _state.remove_leaf(monitor, leaf, current_workspace)
-    _state.insert_hwnd(monitor, hwnd, target_workspace)
+    # Always a new top-level sibling of target_workspace's root, not next
+    # to whatever leaf happens to be focused there (insert_hwnd's usual
+    # behavior) - a predictable landing spot (always a new edge column/
+    # row) regardless of that workspace's focus history.
+    _state.insert_hwnd_at_root(monitor, hwnd, target_workspace)
     _state.reflow(monitor, current_workspace)
-    _state.reflow(monitor, target_workspace)
-    win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
 
-    _persist_workspace_state(monitor)
-    update_focus_border()
+    switch_workspace(monitor, target_workspace)
+    # switch_workspace restores whichever window was topmost/focused the
+    # LAST time target_workspace was visible, which usually isn't the one
+    # just moved here - force it to the front instead, since "move to
+    # workspace" following along should mean landing on the moved window,
+    # not whatever used to have focus there.
+    if win32gui.IsWindow(hwnd):
+        _force_foreground(hwnd)
 
 
 def move_to_workspace_action(data):

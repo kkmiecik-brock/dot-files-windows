@@ -24,6 +24,7 @@ DEFAULT_OUTER_GAP = {"top": 0, "right": 0, "bottom": 0, "left": 0}
 DEFAULT_RESIZE_STEP = 0.05
 DEFAULT_BORDER = {"enabled": True, "color": "#cba6f7", "corner_style": "rounded"}
 DEFAULT_FLOATING = {"center_on_open": False}
+DEFAULT_WORKSPACE_TOGGLE_BACK = False
 
 
 class TilingState:
@@ -66,6 +67,7 @@ class TilingState:
         self.resize_step = DEFAULT_RESIZE_STEP
         self.border = DEFAULT_BORDER
         self.floating = DEFAULT_FLOATING
+        self.workspace_toggle_back = DEFAULT_WORKSPACE_TOGGLE_BACK
         self.workspaces = {}  # stable monitor id -> configured workspace count
 
     def reset(self):
@@ -218,6 +220,16 @@ class TilingState:
         target = self.focused_leaf(monitor, workspace)
         rect = self.compute_rects(monitor, workspace).get(target, self.work_area(monitor))
         new_root, new_leaf = tree.insert(self.root(monitor, workspace), target, hwnd, rect)
+        self.set_root(monitor, new_root, workspace)
+        self.set_focused_leaf(monitor, new_leaf, workspace)
+        return new_leaf
+
+    def insert_hwnd_at_root(self, monitor, hwnd, workspace=DEFAULT_WORKSPACE):
+        """Same as insert_hwnd, but always lands as a new top-level sibling
+        of the workspace's root (see tree.insert_at_root) instead of next
+        to whatever leaf is currently focused there - used by events.
+        move_to_workspace for a predictable landing spot."""
+        new_root, new_leaf = tree.insert_at_root(self.root(monitor, workspace), hwnd, self.work_area(monitor))
         self.set_root(monitor, new_root, workspace)
         self.set_focused_leaf(monitor, new_leaf, workspace)
         return new_leaf

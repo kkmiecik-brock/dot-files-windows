@@ -62,6 +62,7 @@
     "floating": {
       "center_on_open": true
     },
+    "workspace_toggle_back": true,
     "workspaces": {
       "Remote_Monitor": 10,
       "AUO6092": 10

@@ -188,6 +188,35 @@ def insert(root, target_leaf, new_item, rect, before=False):
     return container, new_leaf
 
 
+def insert_at_root(root, new_item, rect):
+    """Returns (new_root, new_leaf) after appending new_item as a new
+    top-level sibling of root, regardless of which leaf happens to be
+    focused/how deeply nested it is - a predictable "always a new edge
+    column/row" landing spot for callers that don't want insert()'s usual
+    "next to whatever's currently focused" placement (see
+    events.move_to_workspace)."""
+    new_leaf = Leaf(new_item)
+
+    if root is None:
+        return new_leaf, new_leaf
+
+    if isinstance(root, Leaf):
+        # Bare root leaf, same "wrap in a new container" case as insert().
+        width, height = rect[2] - rect[0], rect[3] - rect[1]
+        orientation = "horizontal" if width >= height else "vertical"
+        container = Container(orientation)
+        container.add_child(root, 0, 0.5)
+        container.add_child(new_leaf, 1, 0.5)
+        return container, new_leaf
+
+    # root is already a Container - append as an additional top-level child.
+    share = 1.0 / (len(root.children) + 1)
+    for i in range(len(root.ratios)):
+        root.ratios[i] *= 1 - share
+    root.add_child(new_leaf, len(root.children), share)
+    return root, new_leaf
+
+
 def remove(root, leaf):
     """Returns the new root after removing leaf. A parent container left
     with exactly one remaining child is collapsed - that child is promoted
