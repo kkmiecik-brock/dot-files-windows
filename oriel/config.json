@@ -71,11 +71,11 @@
       { "process": "explorer.exe", "class_not": "CabinetWClass" },
       { "process": ["taskmgr.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "textinputhost.exe", "systemsettings.exe", "logioverlay.exe", "logioptions.exe", "powertoys.quickaccess.exe", "microsoft.cmdpal.ui.exe", "selfservice.exe"] },
       { "process": ["firefox.exe", "msedge.exe", "chrome.exe"], "class": "#32770" },
-      { "process": ["firefox.exe", "msedge.exe", "chrome.exe"], "title_contains": ["save as", "open", "download"] },
+      { "process": ["firefox.exe", "msedge.exe", "chrome.exe"], "title": ["save as", "open", "download"] },
       { "process": "excel.exe", "class_not": "XLMAIN" },
       { "process": "winword.exe", "class_not": "OpusApp" },
       { "process": "powerpnt.exe", "class_not": "PPTFrameClass" },
-      { "process": "ms-teams.exe", "title_contains": "microsoft teams notification" }
+      { "process": "ms-teams.exe", "title": "microsoft teams notification" }
     ],
     "floating_rules": [
       { "process": "explorer.exe", "class": "CabinetWClass" },
@@ -84,9 +84,10 @@
       { "process": "code.exe", "class": "Chrome_WidgetWin_0" },
       { "class": "ApplicationFrameWindow", "title": "Settings" },
       { "process": "windows365.exe", "class": "MainWindow" },
-      { "process": "ms-teams.exe", "title_contains": "meeting join", "sticky": true, "position": "bottom-right", "gap": 20, "width": 450, "height": 850, "activate": false },
-      { "process": "ms-teams.exe", "title_contains": "meeting compact view", "sticky": true, "position": "bottom-right", "gap": 20, "activate": false },
-      { "process": "ms-teams.exe", "title_contains": "sharing control bar", "sticky": true, "position": "top", "border": false, "activate": false }
+      { "process": "ms-teams.exe", "title": "meeting join", "sticky": true, "position": "bottom-right", "gap": 20, "width": 450, "height": 850, "activate": false },
+      { "process": "ms-teams.exe", "title": "meeting compact view", "sticky": true, "position": "bottom-right", "gap": 20, "activate": false },
+      { "process": "ms-teams.exe", "title": "sharing control bar", "sticky": true, "position": "top", "border": false, "activate": false },
+      { "process": "ms-teams.exe", "class": "TeamsWebView", "title": "\\|", "title_not": "^(chat|calendar|calls|activity|teams|files|apps|search results in|meeting join|meeting compact view|sharing control bar)\\s*\\|", "sticky": true, "position": "bottom-right", "gap": 20, "activate": false }
     ]
   },
   "autostart": {

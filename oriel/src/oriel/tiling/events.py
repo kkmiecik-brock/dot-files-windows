@@ -1084,6 +1084,7 @@ def on_window_shown(hwnd):
 
     _state.insert_hwnd(monitor, hwnd, workspace)
     _state.reflow(monitor, workspace)
+    _strip_topmost(hwnd)
     if workspace != active_workspace and win32gui.IsWindow(hwnd):
         # Landed on a workspace that isn't the one currently visible on this
         # monitor - keep it out of sight until switch_workspace brings that
@@ -1165,6 +1166,24 @@ def _tick_floating_settle_retries():
         on_window_shown(hwnd)
 
 
+def _reraise_sticky_windows():
+    """Some apps (confirmed live: Teams) set WS_EX_TOPMOST on their own
+    windows by default, independent of anything oriel does - so a sticky
+    window (also topmost, via _raise_floating_window) isn't uniquely on
+    top of everything, it's competing with other topmost windows for
+    relative order within that same band. oriel only raises it once, at
+    creation - activating any OTHER topmost window (e.g. clicking back
+    into Teams' main chat/calendar window) moves that one to the top of
+    the band instead, visually burying the sticky one with nothing to
+    re-assert it afterward. Runs on every EVENT_SYSTEM_FOREGROUND (a real
+    focus change, not just window activity) to win that race back - z-
+    order only, no activate, so it never steals focus from whatever the
+    user just clicked into."""
+    for hwnd in _state.sticky_hwnds():
+        if win32gui.IsWindow(hwnd):
+            threading.Thread(target=_raise_floating_window, args=(hwnd, False), daemon=True).start()
+
+
 def recheck_if_pending(hwnd):
     """EVENT_OBJECT_LOCATIONCHANGE and EVENT_SYSTEM_FOREGROUND are real
     signals that a window is still settling its own setup (still moving
@@ -1174,6 +1193,29 @@ def recheck_if_pending(hwnd):
     at least once), so this adds no cost to window activity in general."""
     if hwnd in _manageable_retries:
         on_window_shown(hwnd)
+
+
+def _strip_topmost(hwnd):
+    """oriel's tiled windows are never meant to be topmost - some apps
+    (confirmed live: Teams' main Chat/Calendar window) set WS_EX_TOPMOST on
+    their own windows independent of anything oriel does, which lets a
+    merely-tiled window compete in the topmost z-order band against
+    oriel's actual floating/sticky windows and sometimes win, burying them.
+    Called once when a window is newly tiled, and again on every
+    enforce_tiled_placement check in case an app sets this later (e.g. a
+    meeting reminder popping up on an already-tiled window)."""
+    if not win32gui.IsWindow(hwnd):
+        return
+    exstyle = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+    if not (exstyle & win32con.WS_EX_TOPMOST):
+        return
+    try:
+        win32gui.SetWindowPos(
+            hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0,
+            win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE,
+        )
+    except win32gui.error:
+        pass
 
 
 def enforce_tiled_placement(hwnd):
@@ -1190,6 +1232,7 @@ def enforce_tiled_placement(hwnd):
     monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None:
         return
+    _strip_topmost(hwnd)
     if _state.fullscreen_leaf(monitor, workspace) is leaf:
         return
     if geometry.monitor_of(hwnd) != monitor:
@@ -1811,6 +1854,7 @@ def _win_event_proc(hWinEventHook, event, hwnd, idObject, idChild, idEventThread
         elif event == EVENT_SYSTEM_FOREGROUND:
             recheck_if_pending(hwnd)
             enforce_tiled_placement(hwnd)
+            _reraise_sticky_windows()
             update_focus_border()
         elif event == EVENT_OBJECT_LOCATIONCHANGE:
             recheck_if_pending(hwnd)

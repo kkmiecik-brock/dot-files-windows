@@ -34,6 +34,7 @@ by editing this file.
 import ctypes
 import ctypes.wintypes
 import os
+import re
 
 import win32api
 import win32con
@@ -64,17 +65,19 @@ def is_cloaked(hwnd):
 
 # Loaded from config.json's tiling.ignore_rules / tiling.floating_rules -
 # see load_ignore_rules()/load_floating_rules(). Each rule is a dict of
-# field -> value/[values]; every field present in a rule must match for
+# field -> pattern/[patterns]; every field present in a rule must match for
 # that rule to apply (AND), and a window matches the list if ANY rule
 # matches (OR across the list). Supported fields:
-#   process         - exact process name match (case-insensitive)
-#   class            - exact class name match (case-insensitive)
-#   class_contains   - substring match against class name (case-insensitive)
-#   class_not        - excluded only if class does NOT match (case-insensitive)
-#   title            - exact title match (case-insensitive)
-#   title_contains   - substring match against title (case-insensitive)
-#   title_not_contains - excluded if title DOES contain this substring (case-insensitive)
-# Any field's value may be a single string or a list (list = "matches any of").
+#   process      - regex match against process name (case-insensitive)
+#   class        - regex match against class name (case-insensitive)
+#   title        - regex match against title (case-insensitive)
+#   process_not  - excluded if process DOES match this regex
+#   class_not    - excluded if class DOES match this regex
+#   title_not    - excluded if title DOES match this regex
+# All six use re.search (i.e. "matches somewhere in the string", covering
+# what used to be separate _contains fields) - anchor with ^/$ for an
+# exact match. Any field's value may be a single pattern or a list of
+# patterns (list = "matches any of").
 _ignore_rules = []
 _floating_rules = []
 
@@ -93,30 +96,22 @@ def _as_list(value):
     return value if isinstance(value, list) else [value]
 
 
-def _equals_any(value, spec):
-    value = value.lower()
-    return any(value == candidate.lower() for candidate in _as_list(spec))
-
-
-def _contains_any(value, spec):
-    value = value.lower()
-    return any(candidate.lower() in value for candidate in _as_list(spec))
+def _matches_any(value, patterns):
+    return any(re.search(pattern, value, re.IGNORECASE) for pattern in _as_list(patterns))
 
 
 def _rule_matches(rule, process_name, class_name, title):
-    if "process" in rule and not _equals_any(process_name, rule["process"]):
+    if "process" in rule and not _matches_any(process_name, rule["process"]):
         return False
-    if "class" in rule and not _equals_any(class_name, rule["class"]):
+    if "process_not" in rule and _matches_any(process_name, rule["process_not"]):
         return False
-    if "class_contains" in rule and not _contains_any(class_name, rule["class_contains"]):
+    if "class" in rule and not _matches_any(class_name, rule["class"]):
         return False
-    if "class_not" in rule and _equals_any(class_name, rule["class_not"]):
+    if "class_not" in rule and _matches_any(class_name, rule["class_not"]):
         return False
-    if "title" in rule and not _equals_any(title, rule["title"]):
+    if "title" in rule and not _matches_any(title, rule["title"]):
         return False
-    if "title_contains" in rule and not _contains_any(title, rule["title_contains"]):
-        return False
-    if "title_not_contains" in rule and _contains_any(title, rule["title_not_contains"]):
+    if "title_not" in rule and _matches_any(title, rule["title_not"]):
         return False
     return True
 
@@ -162,19 +157,18 @@ def is_floating_configured(hwnd):
 
 def could_become_floating_configured(hwnd):
     """Whether hwnd's process/class alone match a tiling.floating_rules
-    entry, ignoring that rule's title/title_contains/title_not_contains
-    criteria. A freshly- shown window's title can still be a transitional
-    placeholder - Teams' meeting window confirmed live to pass
-    is_manageable() immediately with a generic title, then rename moments
-    later via NAMECHANGE to something floating_rules actually matches. By
-    then it's already been tiled (and resized to its tile share) with no
-    way back to its original size, so events.on_window_shown uses this to
-    give such a window a few retries (reusing the existing
-    MANAGEABLE_RETRY_TIMER tick, not a new timer) before ever committing to
-    tiling it."""
+    entry, ignoring that rule's title/title_not criteria. A freshly-
+    shown window's title can still be a transitional placeholder - Teams'
+    meeting window confirmed live to pass is_manageable() immediately with
+    a generic title, then rename moments later via NAMECHANGE to something
+    floating_rules actually matches. By then it's already been tiled (and
+    resized to its tile share) with no way back to its original size, so
+    events.on_window_shown uses this to give such a window a few retries
+    (reusing the existing MANAGEABLE_RETRY_TIMER tick, not a new timer)
+    before ever committing to tiling it."""
     process_name, class_name, _title = _window_identity(hwnd)
     for rule in _floating_rules:
-        stripped = {k: v for k, v in rule.items() if k not in ("title", "title_contains", "title_not_contains")}
+        stripped = {k: v for k, v in rule.items() if k not in ("title", "title_not")}
         if not stripped:
             continue  # rule constrains ONLY by title - nothing to pre-check
         if _rule_matches(stripped, process_name, class_name, ""):
