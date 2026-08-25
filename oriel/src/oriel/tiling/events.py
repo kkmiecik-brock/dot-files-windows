@@ -1018,7 +1018,7 @@ def on_window_shown(hwnd):
         return
     _monitor, _workspace, existing = _state.find_leaf_any_monitor(hwnd)
     if existing is not None:
-        if is_floating_configured(hwnd):
+        if is_floating_configured(hwnd) and floating_rule_options(hwnd)["rename_promote"]:
             # Already tiled, but its identity now matches floating_rules -
             # confirmed live with Teams' compact meeting window: it can
             # pass is_manageable() and get tiled on its very first SHOW
@@ -1027,6 +1027,12 @@ def on_window_shown(hwnd):
             # this, that NAMECHANGE would just hit the early-return above
             # forever - once tiled, always tiled - so this migrates it out
             # the same way toggle_floating's tiled->floating branch does.
+            # Gated on rename_promote (see its docstring) since the SAME
+            # NAMECHANGE mechanism otherwise also hijacked Teams' ordinary
+            # already-tiled main window the instant the user switched
+            # channels/chats, which reshapes its title into the exact same
+            # "<name> | Microsoft Teams" pattern a genuine ad-hoc meeting
+            # popup uses.
             next_focus = _closest_sibling_leaf(existing)
             _state.remove_leaf(_monitor, existing, _workspace)
             _state.reflow(_monitor, _workspace)

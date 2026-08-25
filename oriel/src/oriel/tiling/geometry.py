@@ -7,6 +7,7 @@ import ctypes
 from ctypes import wintypes
 
 import win32api
+import win32com.client
 import win32con
 import win32gui
 
@@ -100,8 +101,12 @@ def stable_monitor_id(monitor):
     if monitor not in _stable_id_cache:
         try:
             device_name = win32api.GetMonitorInfo(monitor)["Device"]
-            full_id = win32api.EnumDisplayDevices(device_name, 0).DeviceID or None
-            _stable_id_cache[monitor] = _shorten_device_id(full_id)
+            device = win32api.EnumDisplayDevices(device_name, 0)
+            full_id = device.DeviceID or None
+            base_id = _shorten_device_id(full_id)
+            interface_id = win32api.EnumDisplayDevices(device_name, 0, 1).DeviceID or None
+            serial = _query_edid_serial(interface_id)
+            _stable_id_cache[monitor] = f"{base_id}:{serial}" if base_id and serial else base_id
         except Exception:
             _stable_id_cache[monitor] = None
     return _stable_id_cache[monitor]
@@ -113,15 +118,52 @@ def _shorten_device_id(device_id):
     device-class GUID, and the trailing instance number is the LEAST stable
     part of all (RDP virtual displays get a new instance on every reconnect,
     real monitors can shift it too on a driver reinstall/port change) - drop
-    both, keeping just <model>, so an RDP session's workspace config survives
-    reconnects. Trade-off accepted: two simultaneous monitors sharing the
-    exact same model (two identical real monitors, or multi-monitor RDP)
-    would collide onto the same id - same class of v1 limitation as the
-    identical-monitor-model caveat already documented for the full id."""
+    both, keeping just <model>. See _query_edid_serial for how two
+    simultaneous monitors sharing this same <model> (two identical real
+    monitors, or multi-monitor RDP) get disambiguated when possible."""
     if device_id is None:
         return None
     parts = device_id.split("\\")
     return parts[1] if len(parts) == 4 else device_id
+
+
+def _query_edid_serial(interface_id):
+    """Looks up a real monitor's EDID-reported serial number via WMI's
+    WmiMonitorID class, correlated against `interface_id` (the
+    \\\\?\\DISPLAY#<model>#<hwid>#{...} interface path from
+    EnumDisplayDevices(..., 1), i.e. EDD_GET_DEVICE_INTERFACE_NAME) - WMI's
+    own InstanceName for the same physical monitor is DISPLAY\\<model>\\
+    <hwid>_0, using backslashes instead of the interface path's '#'
+    separators. A real serial is both stable across reconnects/port
+    changes AND unique per physical unit, unlike the model name alone
+    (stable_monitor_id's base id) - the only piece of information here
+    that actually disambiguates two simultaneously-connected identical-
+    model monitors instead of just guessing.
+
+    Returns None (falling back to stable_monitor_id's model-only base id,
+    today's exact prior behavior) if: WMI is unavailable, no matching
+    instance is found, or the reported serial is blank/degenerate (e.g. a
+    literal "0" - confirmed live: what this laptop's own built-in panel
+    reports, never a real distinguishing value) - deliberately not treated
+    as ambiguous rather than risk breaking RDP virtual displays, which
+    don't expose a meaningful serial at all."""
+    if not interface_id:
+        return None
+    hwid = interface_id.split("#")
+    if len(hwid) < 3:
+        return None
+    needle = f"{hwid[1]}\\{hwid[2]}".upper()
+    try:
+        wmi = win32com.client.GetObject(r"winmgmts:\\.\root\wmi")
+        for item in wmi.InstancesOf("WmiMonitorID"):
+            if needle not in item.InstanceName.upper():
+                continue
+            codes = item.SerialNumberID or ()
+            serial = "".join(chr(c) for c in codes if c != 0).strip()
+            return serial if len(serial) >= 3 else None
+    except Exception:
+        return None
+    return None
 
 
 def list_monitors():

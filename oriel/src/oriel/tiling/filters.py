@@ -185,6 +185,7 @@ FLOATING_RULE_DEFAULTS = {
     "height": None,
     "center_delay": None,
     "activate": True,
+    "rename_promote": True,
 }
 
 
@@ -222,7 +223,17 @@ def floating_rule_options(hwnd):
     just z-order (see events._raise_floating_window) - set false for a
     window that appears on its own (e.g. a Teams meeting/notification
     popping up) rather than from a deliberate user open, where stealing
-    focus would be disruptive. "border": false opts a window out of both
+    focus would be disruptive. "rename_promote" (default True) controls
+    whether events.on_window_shown is allowed to migrate an ALREADY-TILED
+    window to floating when a later NAMECHANGE makes it start matching this
+    rule (see could_become_floating_configured's docstring for why that
+    happens at all) - set false for a broad/catch-all rule whose title
+    pattern is a fallback for windows that were never floating-configured
+    in the first place (e.g. Teams' main window just switching channels
+    generates the exact same "<name> | Microsoft Teams" shape a genuine
+    ad-hoc meeting popup does), so ordinary use of an already-tiled window
+    can't get yanked into floating out from under the user. "border": false
+    opts a window out of both
     corner-rounding and focus-border highlighting entirely (see
     TilingState.add_no_border) - for small/transient windows (e.g. a
     screen-share control bar) where oriel's usual per-window chrome looks

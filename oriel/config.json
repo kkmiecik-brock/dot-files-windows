@@ -89,7 +89,7 @@
       { "process": "ms-teams.exe", "title": "meeting join", "sticky": true, "position": "bottom-right", "gap": 20, "width": 450, "height": 850, "activate": false },
       { "process": "ms-teams.exe", "title": "meeting compact view", "sticky": true, "position": "bottom-right", "gap": 20, "activate": false },
       { "process": "ms-teams.exe", "title": "sharing control bar", "sticky": true, "position": "top", "border": false, "activate": false },
-      { "process": "ms-teams.exe", "class": "TeamsWebView", "title": "\\|", "title_not": "^(chat|calendar|calls|activity|teams|files|apps|search results in|meeting join|meeting compact view|sharing control bar)\\s*\\|", "sticky": true, "position": "bottom-right", "gap": 20, "activate": false },
+      { "process": "ms-teams.exe", "class": "TeamsWebView", "title": "\\|", "title_not": "^(chat|calendar|calls|activity|teams|files|apps|search results in|meeting join|meeting compact view|sharing control bar)\\s*\\|", "sticky": true, "position": "bottom-right", "gap": 20, "activate": false, "rename_promote": false },
       { "process": "snagiteditor.exe", "class": "SnagIt9Editor" }
     ]
   },
