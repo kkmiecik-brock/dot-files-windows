@@ -1040,8 +1040,16 @@ def on_window_shown(hwnd):
                 _state.set_focused_leaf(_monitor, next_focus, _workspace)
             _add_floating_window(hwnd, _monitor)
         return
-    floating_monitor, _floating_workspace = _state.find_floating_any_monitor(hwnd)
+    floating_monitor, floating_workspace = _state.find_floating_any_monitor(hwnd)
     if floating_monitor is not None:
+        if floating_workspace != _state.active_workspace(floating_monitor):
+            # Re-activating an existing singleton app (e.g. Settings, whose
+            # window was hidden on some other workspace) fires this same
+            # SHOW/NAMECHANGE path but on an hwnd oriel already tracks - left
+            # as a no-op, the window silently stays hidden with no way for
+            # the user to tell where it went. Bring its own workspace into
+            # view instead, the same as switching to it directly.
+            switch_workspace(floating_monitor, floating_workspace)
         return
     if _state.is_sticky(hwnd):
         return
@@ -1794,6 +1802,11 @@ def finalize_move_resize(hwnd, kind):
     If only position changed, treats it as a move (swap/insert/snap back).
     kind is "move"/"resize" when known (from drag.py via IPC), or None to
     fall back to guessing from the size delta (native OS drags)."""
+    floating_monitor, floating_workspace = _state.find_floating_any_monitor(hwnd)
+    if floating_monitor is not None:
+        _resync_floating_monitor(hwnd, floating_monitor)
+        return
+
     monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None or _state.fullscreen_leaf(monitor, workspace) is leaf:
         return
@@ -1842,6 +1855,25 @@ def finalize_move_resize(hwnd, kind):
     _state.forget_requested_rect(hwnd)
     for dirty_monitor, dirty_workspace in dirty:
         _state.reflow(dirty_monitor, dirty_workspace)
+
+
+def _resync_floating_monitor(hwnd, floating_monitor):
+    """Floating windows have no tree leaf, so the tiled logic above never
+    runs for them - dragging one to a different monitor otherwise left it
+    tracked under its ORIGINAL monitor/workspace forever (confirmed live:
+    switching workspaces on the origin monitor kept hiding it even after it
+    visually lived on a different monitor). Re-derive its real monitor from
+    where it actually is now and re-file it under that monitor's own active
+    workspace, the same landing rule cross-monitor tiled drops already use."""
+    if not win32gui.IsWindow(hwnd):
+        return
+    current_monitor = geometry.monitor_of(hwnd)
+    if current_monitor is None or current_monitor == floating_monitor:
+        return
+    _state.remove_floating(hwnd)
+    _state.add_floating(current_monitor, hwnd, _state.active_workspace(current_monitor))
+    _persist_workspace_state(floating_monitor)
+    _persist_workspace_state(current_monitor)
 
 
 def on_move_resize_end(hwnd):
