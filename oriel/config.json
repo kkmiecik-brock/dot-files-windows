@@ -68,7 +68,7 @@
       "AUO6092": 10
     },
     "ignore_rules": [
-      { "class": ["Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW", "Windows.UI.Core.CoreWindow", "ForegroundStaging", "MultitaskingViewFrame", "TaskListThumbnailWnd", "SysShadow", "tooltips_class32", "#32768", "XamlExplorerHostIslandWindow", "SnagIt9Editor"] },
+      { "class": ["Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW", "Windows.UI.Core.CoreWindow", "ForegroundStaging", "MultitaskingViewFrame", "TaskListThumbnailWnd", "SysShadow", "tooltips_class32", "#32768", "XamlExplorerHostIslandWindow"] },
       { "process": "explorer.exe", "class_not": "CabinetWClass" },
       { "process": ["taskmgr.exe", "searchhost.exe", "shellexperiencehost.exe", "startmenuexperiencehost.exe", "textinputhost.exe", "systemsettings.exe", "logioverlay.exe", "logioptions.exe", "powertoys.quickaccess.exe", "microsoft.cmdpal.ui.exe", "selfservice.exe", "pangpa.exe"] },
       { "process": ["firefox.exe", "msedge.exe", "chrome.exe"], "class": "#32770" },
@@ -76,7 +76,8 @@
       { "process": "excel.exe", "class_not": "XLMAIN" },
       { "process": "winword.exe", "class_not": "OpusApp" },
       { "process": "powerpnt.exe", "class_not": "PPTFrameClass" },
-      { "process": "ms-teams.exe", "title": "microsoft teams notification" }
+      { "process": "ms-teams.exe", "title": "microsoft teams notification" },
+      { "process": "snagitcapture.exe", "class": "HwndWrapper\\[DefaultDomain" }
     ],
     "floating_rules": [
       { "process": "explorer.exe", "class": "CabinetWClass" },
@@ -88,7 +89,8 @@
       { "process": "ms-teams.exe", "title": "meeting join", "sticky": true, "position": "bottom-right", "gap": 20, "width": 450, "height": 850, "activate": false },
       { "process": "ms-teams.exe", "title": "meeting compact view", "sticky": true, "position": "bottom-right", "gap": 20, "activate": false },
       { "process": "ms-teams.exe", "title": "sharing control bar", "sticky": true, "position": "top", "border": false, "activate": false },
-      { "process": "ms-teams.exe", "class": "TeamsWebView", "title": "\\|", "title_not": "^(chat|calendar|calls|activity|teams|files|apps|search results in|meeting join|meeting compact view|sharing control bar)\\s*\\|", "sticky": true, "position": "bottom-right", "gap": 20, "activate": false }
+      { "process": "ms-teams.exe", "class": "TeamsWebView", "title": "\\|", "title_not": "^(chat|calendar|calls|activity|teams|files|apps|search results in|meeting join|meeting compact view|sharing control bar)\\s*\\|", "sticky": true, "position": "bottom-right", "gap": 20, "activate": false },
+      { "process": "snagiteditor.exe", "class": "SnagIt9Editor" }
     ]
   },
   "autostart": {
