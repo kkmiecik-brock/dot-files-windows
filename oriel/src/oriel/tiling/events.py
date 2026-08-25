@@ -992,6 +992,15 @@ def _delayed_center_floating_window(hwnd, monitor, position="center", gap=0, wid
 
 
 def on_window_shown(hwnd):
+    if not win32gui.IsWindow(hwnd):
+        # A burst of SHOW events for windows that are already gone by the
+        # time this runs - confirmed live during an RDP reconnect, which
+        # fires a flood of these for short-lived internal windows within
+        # the same tick. GetParent (and everything below) would otherwise
+        # throw on an invalid handle - each one costing a full traceback
+        # format + disk write on this single event-loop thread, backlogging
+        # real events queued behind them.
+        return
     if win32gui.GetParent(hwnd):
         # A genuine top-level window never has a parent (an owned window
         # uses GW_OWNER, not GetParent) - a non-zero parent means this is a
@@ -1107,6 +1116,20 @@ def on_window_shown(hwnd):
     _pending_repaint_nudges.add(hwnd)
     _persist_workspace_state(monitor)
     update_focus_border()
+
+
+def _tick_ghost_sweep():
+    """Runs on every MANAGEABLE_RETRY_TIMER tick (see run_message_loop) -
+    catches any tracked leaf whose window has already gone invalid without
+    ever generating another event to trigger enforce_tiled_placement's own
+    self-heal (e.g. its DESTROY event was dropped, and it's just sitting
+    there, never focused/moved again to trigger a recheck) - left alone, a
+    leaf like this silently occupies a full tile share forever. Cheap: just
+    an IsWindow check per currently-tracked leaf, typically very few."""
+    for monitor, workspace in list(_state.all_monitor_workspaces()):
+        for leaf in list(tree.all_leaves(_state.root(monitor, workspace))):
+            if not win32gui.IsWindow(leaf.item):
+                _unmanage(monitor, workspace, leaf)
 
 
 def _tick_repaint_nudges():
@@ -1234,6 +1257,18 @@ def enforce_tiled_placement(hwnd):
         return
     monitor, workspace, leaf = _state.find_leaf_any_monitor(hwnd)
     if leaf is None:
+        return
+    if not win32gui.IsWindow(hwnd):
+        # A tracked leaf whose window is already gone - normally
+        # on_window_destroyed cleans this up via its own DESTROY event, but
+        # that event can be dropped entirely under load (confirmed live:
+        # during the same RDP-reconnect burst that was flooding this
+        # function with crashes from geometry.monitor_of() blowing up on a
+        # dead hwnd below). Left unmanaged, a leaf like this silently
+        # occupies a full tile share forever, shrinking every real sibling
+        # for no visible reason - self-heal here instead of leaving it a
+        # permanent ghost.
+        _unmanage(monitor, workspace, leaf)
         return
     _strip_topmost(hwnd)
     if _state.fullscreen_leaf(monitor, workspace) is leaf:
@@ -1956,6 +1991,7 @@ def run_message_loop():
                 _tick_repaint_nudges()
                 _tick_pending_hides()
                 _tick_focus_border()
+                _tick_ghost_sweep()
                 continue
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))

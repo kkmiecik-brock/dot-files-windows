@@ -13,6 +13,9 @@ window. Narrow edge case, not worth extra validation for.
 import json
 import os
 
+import win32api
+import win32gui
+
 from oriel.tiling import geometry
 
 STATE_PATH = os.path.join(os.path.expanduser("~"), ".config", "oriel", "workspace_state.json")
@@ -66,3 +69,48 @@ def save_monitor(tiling_state, monitor):
             json.dump(data, f)
     except OSError:
         pass
+
+
+def dump_state():
+    """Diagnostic CLI helper (see tiling/__main__.py --dump-state): prints
+    the persisted workspace_state.json in a human-readable form - cross-
+    referenced with which monitor (if any) currently connected owns each
+    stable id, and each window's live title/validity, since the raw JSON
+    alone is just opaque hwnd numbers. This is a standalone process, not
+    the live daemon, so it reads the last-persisted snapshot (see
+    save_monitor, called after nearly every state mutation, for how fresh
+    that normally is) rather than the daemon's actual in-memory state.
+    Also surfaces "ghost" leaves directly: a persisted hwnd that no longer
+    exists but is still occupying a tile share in the daemon's tree until
+    something notices and removes it (confirmed live: a dropped DESTROY
+    event during an RDP reconnect burst can leave one of these behind)."""
+    geometry.ensure_dpi_awareness()  # must run before any monitor enumeration - see ensure_dpi_awareness
+    persisted = load()
+    if not persisted:
+        print("(no persisted workspace state)")
+        return
+
+    live_by_stable_id = {}
+    for handle, _hdc, _rect in win32api.EnumDisplayMonitors():
+        monitor = int(handle)
+        stable_id = geometry.stable_monitor_id(monitor)
+        if stable_id is not None:
+            live_by_stable_id[stable_id] = monitor
+
+    for stable_id, entry in persisted.items():
+        monitor = live_by_stable_id.get(stable_id)
+        status = f"connected, bounds {geometry.monitor_bounds(monitor)}" if monitor is not None else "NOT currently connected"
+        print(f"{stable_id}  ({status})")
+        print(f"  active workspace: {entry.get('active')}")
+        windows = entry.get("windows", {})
+        if not windows:
+            print("  (no windows)")
+        for hwnd_str, workspace in windows.items():
+            hwnd = int(hwnd_str)
+            if win32gui.IsWindow(hwnd):
+                title = win32gui.GetWindowText(hwnd) or "(no title)"
+                cls = win32gui.GetClassName(hwnd)
+                print(f"  workspace {workspace}: hwnd={hwnd}  {title!r}  class={cls}")
+            else:
+                print(f"  workspace {workspace}: hwnd={hwnd}  *** STALE - window no longer exists ***")
+        print()
