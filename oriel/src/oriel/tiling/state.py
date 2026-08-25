@@ -343,10 +343,25 @@ class TilingState:
         for monitor, workspace in list(self._roots):
             self.reflow(monitor, workspace)
 
-    def apply_outcome(self, monitor, leaf, outcome, workspace=DEFAULT_WORKSPACE):
+    def apply_outcome(self, monitor, leaf, outcome, workspace=DEFAULT_WORKSPACE, dest_workspace=None):
         """Applies a policy.Outcome to this state - the one place that
         translates a pure decision into actual tree mutations. Returns the
-        set of (monitor, workspace) pairs that need reflowing."""
+        set of (monitor, workspace) pairs that need reflowing.
+
+        dest_workspace (only meaningful for InsertAtFocused/InsertNear,
+        which can name a *different* monitor via outcome.dest_monitor) is
+        that destination monitor's own currently-active workspace - never
+        just `workspace` again, since workspace numbers are independent per
+        monitor (see tiling.workspaces), not a single index shared across
+        every monitor. Confirmed live: reusing the origin's workspace index
+        for the destination landed a cross-monitor drag on a workspace that
+        happened to not be the one actually visible there, so it was never
+        hidden and just sat on top of whatever WAS visible, overlapping it.
+        Defaults to `workspace` for callers with no cross-monitor concept
+        (Swap/AdjustRatio/NoOp, or a same-monitor InsertNear)."""
+        if dest_workspace is None:
+            dest_workspace = workspace
+
         if isinstance(outcome, policy.Swap):
             outcome.leaf.item, outcome.target.item = outcome.target.item, outcome.leaf.item
             return {(monitor, workspace)}
@@ -354,8 +369,8 @@ class TilingState:
         if isinstance(outcome, policy.InsertAtFocused):
             hwnd = leaf.item
             self.remove_leaf(monitor, leaf, workspace)
-            self.insert_hwnd(outcome.dest_monitor, hwnd, workspace)
-            return {(monitor, workspace), (outcome.dest_monitor, workspace)}
+            self.insert_hwnd(outcome.dest_monitor, hwnd, dest_workspace)
+            return {(monitor, workspace), (outcome.dest_monitor, dest_workspace)}
 
         if isinstance(outcome, policy.InsertNear):
             hwnd = leaf.item
@@ -364,20 +379,20 @@ class TilingState:
             self.remove_leaf(monitor, leaf, workspace)
 
             if outcome.axis is None:
-                new_root, new_leaf = tree.insert(self.root(dest_monitor, workspace), target, hwnd, outcome.target_rect)
+                new_root, new_leaf = tree.insert(self.root(dest_monitor, dest_workspace), target, hwnd, outcome.target_rect)
             else:
                 parent = target.parent
                 if parent is not None and parent.orientation == outcome.axis:
                     new_root, new_leaf = tree.insert(
-                        self.root(dest_monitor, workspace), target, hwnd, outcome.target_rect, before=outcome.before
+                        self.root(dest_monitor, dest_workspace), target, hwnd, outcome.target_rect, before=outcome.before
                     )
                 else:
                     new_root, new_leaf = tree.insert_nested(
-                        self.root(dest_monitor, workspace), target, hwnd, outcome.axis, before=outcome.before
+                        self.root(dest_monitor, dest_workspace), target, hwnd, outcome.axis, before=outcome.before
                     )
-            self.set_root(dest_monitor, new_root, workspace)
-            self.set_focused_leaf(dest_monitor, new_leaf, workspace)
-            return {(monitor, workspace), (dest_monitor, workspace)}
+            self.set_root(dest_monitor, new_root, dest_workspace)
+            self.set_focused_leaf(dest_monitor, new_leaf, dest_workspace)
+            return {(monitor, workspace), (dest_monitor, dest_workspace)}
 
         if isinstance(outcome, policy.AdjustRatio):
             policy.clamp_and_apply_ratio(outcome.parent, outcome.index, outcome.neighbor_index, outcome.new_ratio)

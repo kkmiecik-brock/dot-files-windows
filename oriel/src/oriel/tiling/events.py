@@ -1804,13 +1804,21 @@ def finalize_move_resize(hwnd, kind):
         _state.reflow(monitor, workspace)
         return
 
+    dest_workspace = workspace
     if policy.is_move_gesture(kind, actual, expected):
         cursor_pos = win32api.GetCursorPos()
         dest_monitor = geometry.monitor_at_point(cursor_pos)
         cross = dest_monitor != monitor
+        # Workspace numbers are independent per monitor (see tiling.
+        # workspaces), not one index shared across every monitor - reusing
+        # the origin's workspace for a cross-monitor drop can land it on a
+        # workspace that isn't the one actually visible on that monitor
+        # (confirmed live: it then never gets hidden, and just sits on top
+        # of whatever workspace IS visible there, overlapping it).
+        dest_workspace = _state.active_workspace(dest_monitor) if cross else workspace
 
         search_rects = (
-            tree.compute_all_rects(_state.root(dest_monitor, workspace), _state.work_area(dest_monitor), _state.inner_gap)
+            tree.compute_all_rects(_state.root(dest_monitor, dest_workspace), _state.work_area(dest_monitor), _state.inner_gap)
             if cross else all_rects
         )
 
@@ -1818,7 +1826,7 @@ def finalize_move_resize(hwnd, kind):
     else:
         outcome = policy.decide_resize(leaf, actual, expected, all_rects, _state.inner_gap)
 
-    dirty = _state.apply_outcome(monitor, leaf, outcome, workspace)
+    dirty = _state.apply_outcome(monitor, leaf, outcome, workspace, dest_workspace)
     # A NoOp outcome (dropped on empty space, not onto another tile) leaves
     # the tree - and therefore the leaf's computed target rect - completely
     # unchanged, but the window's REAL on-screen position is now wherever it
