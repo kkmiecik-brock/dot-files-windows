@@ -80,9 +80,9 @@
       { "process": "snagitcapture.exe", "class": "HwndWrapper\\[DefaultDomain" }
     ],
     "floating_rules": [
-      { "process": "explorer.exe", "class": "CabinetWClass" },
+      { "process": "explorer.exe", "class": "CabinetWClass", "width": 1400, "height": 900 },
       { "process": "explorer.exe", "class": "#32770" },
-      { "class": "ApplicationFrameWindow", "title": "calculator"},
+      { "class": "ApplicationFrameWindow", "title": "calculator", "width": 380, "height": 600 },
       { "process": "code.exe", "class": "Chrome_WidgetWin_0" },
       { "class": "ApplicationFrameWindow", "title": "Settings" },
       { "process": "windows365.exe", "class": "MainWindow" },

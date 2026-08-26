@@ -54,6 +54,14 @@ class TilingState:
         # _add_floating_window), for windows where oriel's usual per-window
         # chrome looks out of place (e.g. a small screen-share control bar).
         self._no_border = set()
+        # hwnd -> True, for a window toggle_floating manually forced OUT of
+        # floating despite still matching a tiling.floating_rules entry -
+        # persisted (see persistence.save_monitor/hwnd_workspaces) so a
+        # restart doesn't silently re-apply the rule and re-float it, since
+        # is_floating_configured() has no memory of this on its own (see
+        # events.on_window_shown's rename_promote check/bootstrap_existing_
+        # windows for where this is consulted).
+        self._forced_tiled = set()
         # hwnd -> last (left, top, right, bottom) actually requested via
         # SetWindowPos, frame-expanded - lets reflow() skip re-issuing an
         # identical request to a leaf nothing changed for, instead of
@@ -84,6 +92,7 @@ class TilingState:
         self._floating = {}
         self._sticky = set()
         self._no_border = set()
+        self._forced_tiled = set()
 
     @staticmethod
     def _key(monitor, workspace=DEFAULT_WORKSPACE):
@@ -191,6 +200,15 @@ class TilingState:
 
     def has_no_border(self, hwnd):
         return hwnd in self._no_border
+
+    def add_forced_tiled(self, hwnd):
+        self._forced_tiled.add(hwnd)
+
+    def remove_forced_tiled(self, hwnd):
+        self._forced_tiled.discard(hwnd)
+
+    def is_forced_tiled(self, hwnd):
+        return hwnd in self._forced_tiled
 
     def migrate_workspace(self, monitor, from_workspace, to_workspace):
         """Re-keys everything under (monitor, from_workspace) to (monitor,

@@ -53,6 +53,16 @@ def find_hwnd_workspace(hwnd, persisted):
     return None
 
 
+def find_hwnd_forced_tiled(hwnd, persisted):
+    """Same cross-monitor search as find_hwnd_workspace, for hwnd's
+    persisted forced_tiled flag (see save_monitor) - used by bootstrap_
+    existing_windows' same monitor-identity-changed fallback path."""
+    for entry in persisted.values():
+        if hwnd in entry.get("forced_tiled", []):
+            return True
+    return False
+
+
 def save_monitor(tiling_state, monitor):
     """Read-modify-write so only this monitor's entry changes - others are
     left exactly as last saved."""
@@ -60,9 +70,16 @@ def save_monitor(tiling_state, monitor):
     if stable_id is None:
         return
     data = load()
+    hwnd_workspaces = tiling_state.hwnd_workspaces(monitor)
     data[stable_id] = {
         "active": tiling_state.active_workspace(monitor),
-        "windows": {str(hwnd): workspace for hwnd, workspace in tiling_state.hwnd_workspaces(monitor).items()},
+        "windows": {str(hwnd): workspace for hwnd, workspace in hwnd_workspaces.items()},
+        # Only this monitor's own hwnds (is_forced_tiled has no monitor
+        # concept of its own) - see TilingState.add_forced_tiled/
+        # bootstrap_existing_windows for why this needs to survive a
+        # restart at all (is_floating_configured() would otherwise just
+        # re-float it, silently undoing toggle_floating's override).
+        "forced_tiled": [hwnd for hwnd in hwnd_workspaces if tiling_state.is_forced_tiled(hwnd)],
     }
     try:
         with open(STATE_PATH, "w", encoding="utf-8") as f:

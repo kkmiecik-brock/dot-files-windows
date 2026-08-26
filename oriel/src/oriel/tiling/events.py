@@ -143,6 +143,21 @@ _pending_hides = {}
 # see enforce_tiled_placement, which must never fight a real gesture.
 _active_gestures = set()
 
+# hwnds toggle_floating has manually forced OUT of floating (Alt+V on a
+# window that matches a floating_rules entry) - tracked in TilingState
+# (add_forced_tiled/is_forced_tiled), not here, so it survives a restart
+# via persistence.save_monitor/bootstrap_existing_windows - without that,
+# on_window_shown's rename_promote migration (see its docstring) undoes
+# this choice the moment the window's title next changes (still matches
+# the same rule it always did), and a restart would silently re-float it
+# too (bootstrap otherwise has no way to know it was ever overridden).
+
+# hwnd -> (left, top, right, bottom) captured by toggle_floating right
+# before tiling a floating window, so toggling it back restores exactly
+# where/how big it was instead of wherever tiling last left it. Cleared
+# once consumed by the reverse toggle, or in on_window_destroyed.
+_floating_toggle_rect = {}
+
 # hwnd -> list of monotonic timestamps of recent enforce_tiled_placement
 # reflow attempts, pruned to the last ENFORCE_WINDOW_SECONDS. Time-windowed
 # rather than a simple consecutive-mismatch counter reset on any match: an
@@ -587,6 +602,14 @@ def bootstrap_existing_windows():
             workspace = persistence.find_hwnd_workspace(hwnd, persisted)
 
         if workspace is not None:
+            # Same cross-monitor-identity concern as workspace above - a
+            # manual toggle_floating override (see TilingState.add_forced_
+            # tiled) needs to survive even if this monitor's stable id
+            # changed since it was last saved.
+            forced_tiled = hwnd in (entry.get("forced_tiled", []) if entry else [])
+            if not forced_tiled:
+                forced_tiled = persistence.find_hwnd_forced_tiled(hwnd, persisted)
+
             # Known from persisted history - re-track it even if it's
             # currently hidden (e.g. it was on an inactive workspace when
             # oriel last reset/restarted). is_manageable()'s default
@@ -595,7 +618,17 @@ def bootstrap_existing_windows():
             # else ever re-discovers an already-existing hidden window
             # once bootstrap has skipped it (no new SHOW/UNCLOAKED event
             # is coming for a window that's just sitting there hidden).
-            if is_floating_configured(hwnd):
+            if forced_tiled:
+                # toggle_floating forced this OUT of floating despite
+                # matching a rule - is_floating_configured has no memory of
+                # that on its own, so without this, every restart would
+                # silently re-apply the rule and re-float it right back.
+                _state.add_forced_tiled(hwnd)
+                if is_manageable(hwnd, require_visible=False):
+                    _state.insert_hwnd(monitor, hwnd, workspace)
+                    if workspace != _state.active_workspace(monitor) and win32gui.IsWindowVisible(hwnd):
+                        win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+            elif is_floating_configured(hwnd):
                 # Explicit floating_rules match overrides tiling outright,
                 # same priority order as on_window_shown - checked ahead of
                 # is_manageable() so a fully-chromed match (e.g. Windows
@@ -1018,7 +1051,7 @@ def on_window_shown(hwnd):
         return
     _monitor, _workspace, existing = _state.find_leaf_any_monitor(hwnd)
     if existing is not None:
-        if is_floating_configured(hwnd) and floating_rule_options(hwnd)["rename_promote"]:
+        if not _state.is_forced_tiled(hwnd) and is_floating_configured(hwnd) and floating_rule_options(hwnd)["rename_promote"]:
             # Already tiled, but its identity now matches floating_rules -
             # confirmed live with Teams' compact meeting window: it can
             # pass is_manageable() and get tiled on its very first SHOW
@@ -1388,6 +1421,8 @@ def on_window_destroyed(hwnd):
     _pending_repaint_nudges.discard(hwnd)
     _margin_revalidated.discard(hwnd)
     _pending_hides.pop(hwnd, None)
+    _state.remove_forced_tiled(hwnd)
+    _floating_toggle_rect.pop(hwnd, None)
     _state.remove_no_border(hwnd)
     if _state.remove_sticky(hwnd):
         if hwnd == _bordered_hwnd:
@@ -1596,21 +1631,40 @@ def toggle_floating(_data=None):
         if next_focus is not None:
             _state.set_focused_leaf(monitor, next_focus, workspace)
         _state.add_floating(monitor, hwnd, workspace)
+        _state.remove_forced_tiled(hwnd)
         threading.Thread(target=border.ensure_rounded, args=(hwnd,), daemon=True).start()
-        try:
-            win32gui.SetWindowPos(
-                hwnd, win32con.HWND_TOP, 0, 0, 0, 0,
-                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_ASYNCWINDOWPOS,
-            )
-        except win32gui.error:
-            pass
+        saved_rect = _floating_toggle_rect.pop(hwnd, None)
+        if saved_rect is not None and win32gui.IsWindow(hwnd):
+            left, top, right, bottom = saved_rect
+            try:
+                win32gui.SetWindowPos(
+                    hwnd, 0, left, top, right - left, bottom - top,
+                    win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE,
+                )
+            except win32gui.error:
+                pass
+        # Every OTHER floating window is raised via this same helper (see
+        # _add_floating_window) - toggle_floating's plain HWND_TOP bump
+        # only won the top of the normal z-order band for a moment, never
+        # actually topmost, so it lost out to real floating/sticky windows.
+        # activate=False: the window is already focused (this hotkey acts
+        # on GetForegroundWindow), nothing to steal back.
+        threading.Thread(target=_run_logged, args=(_raise_floating_window, (hwnd, False)), daemon=True).start()
     else:
         monitor, workspace = _state.find_floating_any_monitor(hwnd)
         if monitor is None:
             return
+        rect = geometry.safe_get_window_rect(hwnd)
+        if rect is not None:
+            _floating_toggle_rect[hwnd] = rect
         _state.remove_floating(hwnd)
         _state.insert_hwnd(monitor, hwnd, workspace)
         _state.reflow(monitor, workspace)
+        if is_floating_configured(hwnd):
+            # Only rules would otherwise keep re-floating this hwnd on its
+            # next rename - nothing to override for a window that was never
+            # rule-matched to begin with.
+            _state.add_forced_tiled(hwnd)
     _persist_workspace_state(monitor)
     update_focus_border()
 
@@ -1842,16 +1896,23 @@ def finalize_move_resize(hwnd, kind):
         )
 
         outcome = policy.decide_move(leaf, monitor, dest_monitor, cursor_pos, search_rects)
+        dirty = _state.apply_outcome(monitor, leaf, outcome, workspace, dest_workspace)
     else:
-        outcome = policy.decide_resize(leaf, actual, expected, all_rects, _state.inner_gap)
+        # Unlike decide_move's single Outcome, this is a list (0/1/2 items)
+        # since a corner drag can need BOTH a width and a height adjustment,
+        # each against its own (possibly different) ancestor container -
+        # see policy.decide_resize/_resize_ancestor.
+        adjustments = policy.decide_resize(leaf, actual, expected, all_rects, _state.inner_gap)
+        dirty = {(monitor, workspace)}
+        for adjustment in adjustments:
+            dirty |= _state.apply_outcome(monitor, leaf, adjustment, workspace)
 
-    dirty = _state.apply_outcome(monitor, leaf, outcome, workspace, dest_workspace)
-    # A NoOp outcome (dropped on empty space, not onto another tile) leaves
-    # the tree - and therefore the leaf's computed target rect - completely
-    # unchanged, but the window's REAL on-screen position is now wherever it
-    # was physically dropped. reflow()'s skip-if-unchanged cache only knows
-    # about the target rect, so it would otherwise treat this as "nothing to
-    # do" and never re-issue the SetWindowPos that snaps it back.
+    # An empty/NoOp resize (dropped on empty space, not onto another tile)
+    # leaves the tree - and therefore the leaf's computed target rect -
+    # completely unchanged, but the window's REAL on-screen position is now
+    # wherever it was physically dropped. reflow()'s skip-if-unchanged cache
+    # only knows about the target rect, so it would otherwise treat this as
+    # "nothing to do" and never re-issue the SetWindowPos that snaps it back.
     _state.forget_requested_rect(hwnd)
     for dirty_monitor, dirty_workspace in dirty:
         _state.reflow(dirty_monitor, dirty_workspace)
@@ -2032,12 +2093,26 @@ def run_message_loop():
                 _drain_posted_events()
                 continue
             if msg.message == WM_TIMER and msg.wParam == manageable_retry_timer_id:
-                _tick_manageable_retries()
-                _tick_floating_settle_retries()
-                _tick_repaint_nudges()
-                _tick_pending_hides()
-                _tick_focus_border()
-                _tick_ghost_sweep()
+                # Each tick isolated in its own try/except - unlike
+                # _win_event_proc's single guard around one event's handler,
+                # a single uncaught exception here would otherwise take the
+                # WHOLE daemon down (confirmed live twice: GetCursorPos
+                # raising ERROR_ACCESS_DENIED during a secure-desktop prompt,
+                # and SetWindowPos raising ERROR_INVALID_PARAMETER for a
+                # window in some transitional state) - nothing before this
+                # ever caught it, since run_message_loop itself has no
+                # handler and daemon.run()'s only wraps the whole process
+                # lifetime, logging then re-raising. Separate try/excepts per
+                # tick (not one around all six) also means one persistently
+                # failing tick can't starve the others of their own turn.
+                for _tick in (
+                    _tick_manageable_retries, _tick_floating_settle_retries, _tick_repaint_nudges,
+                    _tick_pending_hides, _tick_focus_border, _tick_ghost_sweep,
+                ):
+                    try:
+                        _tick()
+                    except Exception:
+                        logger.exception("timer tick failed: %s", _tick.__name__)
                 continue
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))

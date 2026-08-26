@@ -110,41 +110,70 @@ def decide_move(leaf, monitor, dest_monitor, cursor_pos, search_rects):
     return InsertNear(dest_monitor, target, axis, before, search_rects[target])
 
 
+def _resize_ancestor(leaf, orientation):
+    """Walks up from `leaf` to the nearest ancestor container split along
+    `orientation` with a sibling to trade space against. A leaf's own
+    direct parent only ever runs ONE axis - e.g. one of several windows
+    stacked vertically in a column has a "vertical" parent with no concept
+    of width at all, so a width-resize on it needs to reach past that
+    parent to the "horizontal" container the whole column is itself a
+    child of. Every leaf inside a single-orientation container shares that
+    container's bounds on the OTHER axis (a vertical split never touches
+    left/right), so the dragged leaf's own actual/expected rect is exactly
+    the resized column's/row's rect too - nothing else needs recomputing.
+    Returns (container, its child that leads down to `leaf`), or
+    (None, None) if no such ancestor exists (e.g. only ever one column)."""
+    child = leaf
+    node = leaf.parent
+    while node is not None:
+        if node.orientation == orientation and len(node.children) >= 2:
+            return node, child
+        child = node
+        node = node.parent
+    return None, None
+
+
 def decide_resize(leaf, actual_rect, expected_rect, all_rects, inner_gap):
-    """Decides how to fold a finished RESIZE gesture's size delta into the
-    parent container's ratios - which sibling loses/gains the space is
-    picked by checking which edge of the window actually moved."""
-    parent = leaf.parent
-    if parent is None or len(parent.children) < 2:
-        return NoOp()
-
-    parent_rect = all_rects.get(parent)
-    if parent_rect is None:
-        return NoOp()
-
+    """Decides how to fold a finished RESIZE gesture's size delta into
+    container ratios - which container (see _resize_ancestor) and which
+    sibling loses/gains the space is picked by checking which edge of the
+    window actually moved. Width and height are resolved independently and
+    BOTH applied when both changed (a corner drag does exactly this) -
+    returns a list of zero, one, or two AdjustRatio outcomes, not a single
+    Outcome, since either axis can need its own separate container/ratio
+    update against a different ancestor (see _resize_ancestor)."""
     dw = (actual_rect[2] - actual_rect[0]) - (expected_rect[2] - expected_rect[0])
     dh = (actual_rect[3] - actual_rect[1]) - (expected_rect[3] - expected_rect[1])
+    adjustments = []
 
-    index = parent.children.index(leaf)
-    n = len(parent.children)
-    total_gap = inner_gap * (n - 1)
+    if abs(dw) > RESIZE_TOLERANCE:
+        container, child = _resize_ancestor(leaf, "horizontal")
+        if container is not None:
+            container_rect = all_rects.get(container)
+            if container_rect is not None:
+                n = len(container.children)
+                available = (container_rect[2] - container_rect[0]) - inner_gap * (n - 1)
+                if available > 0:
+                    index = container.children.index(child)
+                    new_ratio = (actual_rect[2] - actual_rect[0]) / available
+                    left_moved = abs(actual_rect[0] - expected_rect[0]) > RESIZE_TOLERANCE
+                    nbr = (index - 1) if (left_moved and index > 0) else min(index + 1, n - 1)
+                    adjustments.append(AdjustRatio(container, index, nbr, new_ratio))
+    if abs(dh) > RESIZE_TOLERANCE:
+        container, child = _resize_ancestor(leaf, "vertical")
+        if container is not None:
+            container_rect = all_rects.get(container)
+            if container_rect is not None:
+                n = len(container.children)
+                available = (container_rect[3] - container_rect[1]) - inner_gap * (n - 1)
+                if available > 0:
+                    index = container.children.index(child)
+                    new_ratio = (actual_rect[3] - actual_rect[1]) / available
+                    top_moved = abs(actual_rect[1] - expected_rect[1]) > RESIZE_TOLERANCE
+                    nbr = (index - 1) if (top_moved and index > 0) else min(index + 1, n - 1)
+                    adjustments.append(AdjustRatio(container, index, nbr, new_ratio))
 
-    if parent.orientation == "horizontal" and abs(dw) > RESIZE_TOLERANCE:
-        available = (parent_rect[2] - parent_rect[0]) - total_gap
-        if available > 0:
-            new_ratio = (actual_rect[2] - actual_rect[0]) / available
-            left_moved = abs(actual_rect[0] - expected_rect[0]) > RESIZE_TOLERANCE
-            nbr = (index - 1) if (left_moved and index > 0) else min(index + 1, n - 1)
-            return AdjustRatio(parent, index, nbr, new_ratio)
-    elif parent.orientation == "vertical" and abs(dh) > RESIZE_TOLERANCE:
-        available = (parent_rect[3] - parent_rect[1]) - total_gap
-        if available > 0:
-            new_ratio = (actual_rect[3] - actual_rect[1]) / available
-            top_moved = abs(actual_rect[1] - expected_rect[1]) > RESIZE_TOLERANCE
-            nbr = (index - 1) if (top_moved and index > 0) else min(index + 1, n - 1)
-            return AdjustRatio(parent, index, nbr, new_ratio)
-
-    return NoOp()
+    return adjustments
 
 
 def clamp_and_apply_ratio(container, index, neighbor_index, new_ratio):
