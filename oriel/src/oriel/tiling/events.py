@@ -935,6 +935,15 @@ def _center_floating_window(hwnd, monitor, position="center", gap=0, width=None,
     it targeted (in raw GetWindowRect terms), or None if hwnd's rect
     couldn't be read at all, so callers (_delayed_center_floating_window)
     can tell whether the window actually landed where intended."""
+    if win32gui.GetWindowPlacement(hwnd)[1] == win32con.SW_SHOWMAXIMIZED:
+        # A maximized window ignores a plain SetWindowPos resize/move - the
+        # WS_MAXIMIZE state itself dictates its displayed geometry, not
+        # whatever rect we ask for - confirmed live: Explorer opening onto
+        # its own remembered maximized state (unrelated to oriel, just
+        # whatever the user last left an Explorer window as) stayed
+        # fullscreen no matter what width/height a floating_rules entry
+        # configured. Must restore first so everything below actually takes.
+        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
     rect = geometry.safe_get_window_rect(hwnd)
     if rect is None:
         return None
@@ -1817,21 +1826,31 @@ def move_to_workspace(target_workspace):
     monitor, then switches that monitor's view to target_workspace too -
     you follow the window instead of it just disappearing (i3's default
     "move, don't follow" behavior, which this used to match, wasn't
-    wanted here)."""
+    wanted here). Handles a floating window the same as a tiled one (just
+    re-filed under target_workspace's floating set instead of re-inserted
+    into its tree) - a sticky window has no single workspace of its own to
+    move to at all (see find_floating_any_monitor, which never finds one),
+    so this is naturally a no-op for those."""
     hwnd = win32gui.GetForegroundWindow()
     if not hwnd:
         return
     monitor, current_workspace, leaf = _state.find_leaf_any_monitor(hwnd)
-    if leaf is None or current_workspace == target_workspace or target_workspace > _state.workspace_count(monitor):
-        return
-
-    _state.remove_leaf(monitor, leaf, current_workspace)
-    # Always a new top-level sibling of target_workspace's root, not next
-    # to whatever leaf happens to be focused there (insert_hwnd's usual
-    # behavior) - a predictable landing spot (always a new edge column/
-    # row) regardless of that workspace's focus history.
-    _state.insert_hwnd_at_root(monitor, hwnd, target_workspace)
-    _state.reflow(monitor, current_workspace)
+    if leaf is not None:
+        if current_workspace == target_workspace or target_workspace > _state.workspace_count(monitor):
+            return
+        _state.remove_leaf(monitor, leaf, current_workspace)
+        # Always a new top-level sibling of target_workspace's root, not next
+        # to whatever leaf happens to be focused there (insert_hwnd's usual
+        # behavior) - a predictable landing spot (always a new edge column/
+        # row) regardless of that workspace's focus history.
+        _state.insert_hwnd_at_root(monitor, hwnd, target_workspace)
+        _state.reflow(monitor, current_workspace)
+    else:
+        monitor, current_workspace = _state.find_floating_any_monitor(hwnd)
+        if monitor is None or current_workspace == target_workspace or target_workspace > _state.workspace_count(monitor):
+            return
+        _state.remove_floating(hwnd)
+        _state.add_floating(monitor, hwnd, target_workspace)
 
     switch_workspace(monitor, target_workspace)
     # switch_workspace restores whichever window was topmost/focused the
