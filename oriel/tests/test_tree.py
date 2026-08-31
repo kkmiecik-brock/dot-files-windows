@@ -122,3 +122,65 @@ def test_resize_only_affects_shared_boundary_with_neighbor():
     assert root.ratios[index_a] == ratios_before[index_a] + 0.1
     assert root.ratios[index_b] == ratios_before[index_b] - 0.1
     assert root.ratios[index_c] == ratios_before[index_c]
+
+
+def test_serialize_deserialize_round_trips_a_nested_tree():
+    root, leaf_a = tree.insert(None, None, "A", (0, 0, 100, 100))
+    root, leaf_b = tree.insert(root, leaf_a, "B", (0, 0, 200, 100))
+    root, leaf_c = tree.insert_nested(root, leaf_b, "C", "vertical", before=False)
+    tree.resize(leaf_a, 0.1)
+
+    data = tree.serialize(root)
+    rebuilt = tree.deserialize(data)
+
+    assert [leaf.item for leaf in tree.all_leaves(rebuilt)] == ["A", "B", "C"]
+    assert isinstance(rebuilt, tree.Container)
+    assert rebuilt.orientation == root.orientation
+    assert rebuilt.ratios == root.ratios
+    # Nested sub-container's own orientation/ratios also round-trip.
+    nested_original = [c for c in root.children if isinstance(c, tree.Container)][0]
+    nested_rebuilt = [c for c in rebuilt.children if isinstance(c, tree.Container)][0]
+    assert nested_rebuilt.orientation == nested_original.orientation
+    assert nested_rebuilt.ratios == nested_original.ratios
+    # Every leaf's parent link is wired correctly, not left as None.
+    for leaf in tree.all_leaves(rebuilt):
+        assert leaf.parent is not None
+
+
+def test_serialize_deserialize_handles_bare_root_leaf():
+    root, _ = tree.insert(None, None, "A", (0, 0, 100, 100))
+    rebuilt = tree.deserialize(tree.serialize(root))
+    assert isinstance(rebuilt, tree.Leaf)
+    assert rebuilt.item == "A"
+
+
+def test_deserialize_none_or_empty_returns_none():
+    assert tree.deserialize(None) is None
+    assert tree.deserialize({}) is None
+
+
+def test_prune_dead_leaves_removes_only_dead_ones_and_renormalizes():
+    root, leaf_a = tree.insert(None, None, "A", (0, 0, 100, 100))
+    root, leaf_b = tree.insert(root, leaf_a, "B", (0, 0, 100, 100))
+    root, leaf_c = tree.insert(root, leaf_b, "C", (0, 0, 100, 100))
+
+    root = tree.prune_dead_leaves(root, alive_items={"A", "C"})
+
+    assert set(tree.all_leaves(root)) == {leaf_a, leaf_c}
+    assert abs(sum(root.ratios) - 1.0) < 1e-9
+
+
+def test_prune_dead_leaves_collapses_down_to_bare_root():
+    root, leaf_a = tree.insert(None, None, "A", (0, 0, 100, 100))
+    root, leaf_b = tree.insert(root, leaf_a, "B", (0, 0, 100, 100))
+
+    root = tree.prune_dead_leaves(root, alive_items={"A"})
+
+    assert root is leaf_a
+    assert leaf_a.parent is None
+
+
+def test_prune_dead_leaves_can_empty_the_tree_entirely():
+    root, leaf_a = tree.insert(None, None, "A", (0, 0, 100, 100))
+    assert tree.prune_dead_leaves(root, alive_items=set()) is None
+

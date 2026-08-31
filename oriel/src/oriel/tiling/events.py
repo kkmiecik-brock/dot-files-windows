@@ -568,11 +568,49 @@ def _tick_focus_border():
 
 def bootstrap_existing_windows():
     persisted = persistence.load()
+    # hwnds already placed into a tree by the restore pass below - the
+    # per-hwnd loop further down skips these entirely instead of re-
+    # inserting them via the flat insert_hwnd path, which would rebuild a
+    # fresh default 50/50 layout and lose every manual resize/split the
+    # user had (see persistence.save_monitor's "trees" entry).
+    restored_hwnds = set()
     for handle, _hdc, _rect in win32api.EnumDisplayMonitors():
         monitor = int(handle)
         entry = persistence.entry_for(monitor, persisted)
-        if entry is not None:
-            _state.set_active_workspace(monitor, entry.get("active", DEFAULT_WORKSPACE))
+        if entry is None:
+            continue
+        _state.set_active_workspace(monitor, entry.get("active", DEFAULT_WORKSPACE))
+        forced_tiled_hwnds = set(entry.get("forced_tiled", []))
+        for workspace_str, tree_data in entry.get("trees", {}).items():
+            root = tree.deserialize(tree_data)
+            if root is None:
+                continue
+            workspace = int(workspace_str)
+            # A leaf survives pruning only if its window still exists AND
+            # hasn't been reclassified to floating since this was last
+            # saved (e.g. a floating_rules edit) - forced_tiled overrides
+            # that back to tiled, the same priority order on_window_shown/
+            # toggle_floating use everywhere else. Anything pruned out here
+            # but still alive falls through to the per-hwnd loop below,
+            # which re-evaluates it exactly like a window with no tree
+            # history at all.
+            alive = {
+                leaf.item for leaf in tree.all_leaves(root)
+                if win32gui.IsWindow(leaf.item)
+                and (leaf.item in forced_tiled_hwnds or not is_floating_configured(leaf.item))
+            }
+            root = tree.prune_dead_leaves(root, alive)
+            if root is None:
+                continue
+            _state.set_root(monitor, root, workspace)
+            leaves = tree.all_leaves(root)
+            _state.set_focused_leaf(monitor, leaves[0], workspace)
+            for leaf in leaves:
+                restored_hwnds.add(leaf.item)
+                if leaf.item in forced_tiled_hwnds:
+                    _state.add_forced_tiled(leaf.item)
+                if workspace != _state.active_workspace(monitor) and win32gui.IsWindowVisible(leaf.item):
+                    win32gui.ShowWindow(leaf.item, win32con.SW_HIDE)
 
     handles = []
 
@@ -586,7 +624,7 @@ def bootstrap_existing_windows():
     # window ends up last-inserted, roughly matching what you'd expect to
     # see "on top" of the initial layout.
     for hwnd in reversed(handles):
-        if not win32gui.IsWindow(hwnd):
+        if not win32gui.IsWindow(hwnd) or hwnd in restored_hwnds:
             continue
         monitor = geometry.monitor_of(hwnd)
         entry = persistence.entry_for(monitor, persisted)

@@ -242,6 +242,51 @@ def remove(root, leaf):
     return root
 
 
+def prune_dead_leaves(root, alive_items):
+    """Returns the new root after removing every leaf whose item isn't in
+    `alive_items` - for reconciling a tree deserialized from persisted
+    state (see serialize/deserialize) against which of its windows are
+    actually still open. Reuses remove()'s existing single-child-collapse/
+    ratio-redistribution logic one leaf at a time rather than a separate
+    bulk algorithm - safe to do here since removing one leaf never changes
+    any OTHER leaf's identity, only parent linkage/collapsing above it."""
+    for leaf in [leaf for leaf in all_leaves(root) if leaf.item not in alive_items]:
+        root = remove(root, leaf)
+    return root
+
+
+def serialize(node):
+    """Recursively converts a tree into a plain JSON-serializable nested
+    dict - Leaf becomes {"item": ...}, Container becomes {"orientation":
+    ..., "ratios": [...], "children": [...]} - for persistence.py to save
+    verbatim via json.dump. See deserialize for the inverse."""
+    if node is None:
+        return None
+    if isinstance(node, Leaf):
+        return {"item": node.item}
+    return {
+        "orientation": node.orientation,
+        "ratios": list(node.ratios),
+        "children": [serialize(child) for child in node.children],
+    }
+
+
+def deserialize(data):
+    """Inverse of serialize - rebuilds a tree from its nested-dict form
+    (or None, if data is None/missing, e.g. an older workspace_state.json
+    saved before tree persistence existed)."""
+    if not data:
+        return None
+    if "item" in data:
+        return Leaf(data["item"])
+    container = Container(data["orientation"])
+    for child_data, ratio in zip(data["children"], data["ratios"]):
+        child = deserialize(child_data)
+        if child is not None:
+            container.add_child(child, len(container.children), ratio)
+    return container
+
+
 def insert_nested(root, target_leaf, new_item, orientation, before):
     """Wraps target_leaf and a new Leaf(new_item) in a new sub-Container.
     before=True places new_item before target_leaf in the sub-container.

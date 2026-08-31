@@ -16,7 +16,7 @@ import os
 import win32api
 import win32gui
 
-from oriel.tiling import geometry
+from oriel.tiling import geometry, tree
 
 STATE_PATH = os.path.join(os.path.expanduser("~"), ".config", "oriel", "workspace_state.json")
 
@@ -80,6 +80,17 @@ def save_monitor(tiling_state, monitor):
         # restart at all (is_floating_configured() would otherwise just
         # re-float it, silently undoing toggle_floating's override).
         "forced_tiled": [hwnd for hwnd in hwnd_workspaces if tiling_state.is_forced_tiled(hwnd)],
+        # workspace (str, since JSON object keys must be strings) -> tree.
+        # serialize()'s nested dict, for bootstrap_existing_windows to
+        # deserialize/prune back into a live tree - the split topology and
+        # ratios themselves have no other representation anywhere else
+        # (the flat "windows" map above only knows which workspace each
+        # hwnd belongs to, nothing about how they're arranged within it).
+        "trees": {
+            str(workspace): tree.serialize(tiling_state.root(monitor, workspace))
+            for (mon, workspace) in tiling_state.all_monitor_workspaces()
+            if mon == monitor
+        },
     }
     try:
         with open(STATE_PATH, "w", encoding="utf-8") as f:
